@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Data Dyepack mine map</title>
+  <meta name="description" content="Live map of a customer table and company drive with canary customers, decoy files, alarms and stained exports.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2310151b'/%3E%3Cpath d='M5 22l5-11h12l5 11z' fill='%23d6a23b'/%3E%3Ccircle cx='22' cy='21' r='6' fill='%23e5303d'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <path class="ingot" d="M5 22l5-11h12l5 11z"/>
+        <circle class="dye" cx="22" cy="21" r="6"/>
+      </svg>
+      <div>
+        <h1>Data Dyepack</h1>
+        <p>Mine map · Lakeview Fiber lab</p>
+      </div>
+    </div>
+    <div class="mode">
+      <span id="conn" class="conn" data-state="connecting">Connecting</span>
+      <p id="conn-note" class="conn-note" hidden>Can't reach the live stream. <a href="?replay=1">Watch the recorded drill</a></p>
+      <div id="player" class="player" hidden>
+        <button id="play" type="button">Pause</button>
+        <div class="speeds" role="group" aria-label="Replay speed">
+          <button type="button" data-speed="1" aria-pressed="true">1x</button>
+          <button type="button" data-speed="4" aria-pressed="false">4x</button>
+        </div>
+        <button id="restart" type="button">Restart</button>
+        <span id="clock" class="clock">0:00 / 0:00</span>
+      </div>
+    </div>
+  </header>
+
+  <section id="status" class="status" data-state="clear" aria-label="Status">
+    <div class="lamp" role="status">
+      <svg class="icon i-clear" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M7.5 12.5l3 3 6-6.5"/></svg>
+      <svg class="icon i-alarm" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5L2.8 19.5h18.4z"/><path d="M12 9.8v4.6M12 17v.4"/></svg>
+      <svg class="icon i-locked" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg>
+      <strong id="status-word">All clear</strong>
+    </div>
+    <p id="status-line" class="status-line" aria-live="polite">Waiting for the first events.</p>
+    <ol id="phases" class="phases" aria-label="Drill steps">
+      <li data-phase="normal">Normal day</li>
+      <li data-phase="heist-1"><b>1</b>Bulk read</li>
+      <li data-phase="heist-2"><b>2</b>Crack the backup</li>
+      <li data-phase="heist-3"><b>3</b>Use stolen logins</li>
+      <li data-phase="agent"><b>4</b>Agent digs the drive</li>
+    </ol>
+  </section>
+
+  <main class="board">
+    <section class="panel mine-panel" aria-labelledby="mine-h">
+      <h2 id="mine-h">The mine <small>Lakeview Fiber customer table</small></h2>
+      <div id="mine" class="mine"></div>
+      <ul class="legend">
+        <li><i class="sw gold"></i>Real customer rows</li>
+        <li><i class="sw canary"></i>Canary customer</li>
+        <li><i class="sw dug"></i>Rows already read</li>
+        <li><i class="sw dye"></i>Alarm or lock</li>
+        <li><i class="sw crate"></i>Export copy</li>
+      </ul>
+    </section>
+
+    <div class="cols">
+      <div class="col">
+        <section class="panel drive-panel" aria-labelledby="drive-h">
+          <h2 id="drive-h">The drive <small>company files, every file open is watched</small></h2>
+          <div class="proc">
+            <div class="proc-who">
+              <span class="label">Reading the drive</span>
+              <strong id="proc-name">Nobody yet</strong>
+              <span id="proc-last" class="who">Every file open on the drive shows up here.</span>
+            </div>
+            <div class="proc-speed"><strong id="proc-fpm">0</strong><span id="proc-unit">files a minute</span></div>
+            <p id="proc-pace" class="pace" hidden></p>
+          </div>
+          <div id="drive" class="drive"></div>
+          <ul class="legend">
+            <li><i class="sw gold"></i>Customer file</li>
+            <li><i class="sw canary"></i>Decoy file</li>
+            <li><i class="sw steel"></i>Honey locked backup</li>
+            <li><i class="sw rock"></i>Other file</li>
+            <li><i class="sw crate"></i>Locked in place, unlock with one command</li>
+          </ul>
+        </section>
+
+        <section class="panel speed-panel" aria-labelledby="speed-h">
+          <h2 id="speed-h">Read speed <small>customer table, last 3 minutes</small></h2>
+          <div class="now"><strong id="rate">0</strong><span>rows a minute right now</span></div>
+          <div id="chart" class="chart"></div>
+        </section>
+
+        <section class="panel prints-panel" aria-labelledby="prints-h">
+          <h2 id="prints-h">Export fingerprints <small>each export carries its own canaries</small></h2>
+          <ol id="prints" class="prints"></ol>
+          <p id="prints-empty" class="empty">No exports yet. Each one gets its own canaries. That lets an alarm name the exact copy that leaked.</p>
+        </section>
+      </div>
+
+      <div class="col">
+        <section class="panel incident-panel" aria-labelledby="inc-h">
+          <h2 id="inc-h">Incidents <small>triage, report and response</small></h2>
+          <div id="incidents" class="incidents"></div>
+        </section>
+
+        <section class="panel feed-panel" aria-labelledby="feed-h">
+          <h2 id="feed-h">Alarm feed <small>newest first</small></h2>
+          <ol id="feed" class="feed"></ol>
+          <p id="feed-empty" class="empty">No alarms yet. A normal day should stay empty.</p>
+        </section>
+      </div>
+
+      <div class="col">
+        <section class="panel phone-panel" aria-labelledby="phone-h">
+          <h2 id="phone-h">On-call phone <small>what the security team just got</small></h2>
+          <div class="phone">
+            <p id="phone-date" class="phone-date"></p>
+            <p id="phone-time" class="phone-time"></p>
+            <ol id="phone-notes" class="phone-notes"></ol>
+            <p id="phone-empty" class="phone-empty">No alerts yet</p>
+          </div>
+        </section>
+
+        <section class="panel score-panel" aria-labelledby="score-h">
+          <h2 id="score-h">Drill scoreboard <small>fills in as the drill runs</small></h2>
+          <div class="tiles">
+            <div class="tile" id="t-normal_alarms"><span class="k">Normal day alarms</span><b class="v wait">Not yet</b><span class="n">Goal: 0</span></div>
+            <div class="tile" id="t-detect_seconds"><span class="k">Time to catch the bulk read</span><b class="v wait">Not yet</b><span class="n">Goal: 10 s or less</span></div>
+            <div class="tile" id="t-rows_exposed"><span class="k">Real rows exposed</span><b class="v wait">Not yet</b><span class="n">As few as possible</span></div>
+            <div class="tile" id="t-guesses_cracked"><span class="k">Guesses that opened a believable list</span><b class="v wait">Not yet</b><span class="n">Every wrong password still opens a list</span></div>
+            <div class="tile" id="t-ai_pick"><span class="k">Can an AI pick the real list?</span><b class="v wait">Not yet</b><span class="n">Goal: no better than chance</span></div>
+          </div>
+        </section>
+
+        <section class="panel routes-panel" aria-labelledby="routes-h">
+          <h2 id="routes-h">Alert routes <small>who gets told for each severity</small></h2>
+          <table class="routes">
+            <thead><tr><th scope="col"><span class="sr">Severity</span></th><th scope="col">Push</th><th scope="col">SMS</th><th scope="col">Email</th><th scope="col">Discord</th></tr></thead>
+            <tbody id="routes-body"></tbody>
+          </table>
+          <p id="routes-note" class="empty routes-note"></p>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <div id="bloom" class="bloom" aria-hidden="true"></div>
+  <div class="dye-edge" aria-hidden="true"></div>
+  <p id="toast" class="toast" role="status" hidden></p>
+</body>
+</html>
