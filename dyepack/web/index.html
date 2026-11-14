@@ -20,58 +20,67 @@
   </svg>
   <a class="skip" href="#main">Skip to alerts</a>
 
-  <header class="toolbar">
-    <div class="brand"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><span>Data Dyepack</span></div>
-    <span id="conn" class="connection" data-state="connecting" role="status">Connecting</span>
-    <details id="app-menu" class="menu">
-      <summary class="icon-button" aria-label="More options" title="More options"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></summary>
-      <div class="menu-items">
-        <a id="mode-link" href="?replay=1">Watch recorded drill</a>
-        <button id="show-tools" type="button">Lab tools and settings</button>
-      </div>
-    </details>
-  </header>
-
   <main id="main" class="app" tabindex="-1">
     <aside class="alert-sidebar" aria-labelledby="alerts-heading">
       <header class="sidebar-heading">
-        <h1 id="alerts-heading" tabindex="-1">Alerts</h1>
-        <p id="alert-count">Lakeview Fiber</p>
+        <div class="sidebar-title">
+          <h1 id="alerts-heading" tabindex="-1">Alerts</h1>
+          <p id="alert-count">Lakeview Fiber</p>
+        </div>
+        <span id="mobile-conn" class="connection mobile-connection" data-state="connecting" role="status">Connecting</span>
+        <details id="app-menu" class="menu">
+          <summary class="icon-button" aria-label="More options" title="More options"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></summary>
+          <div class="menu-items">
+            <a id="mode-link" href="?replay=1">Watch recorded drill</a>
+            <button id="show-tools" type="button">Lab tools and settings</button>
+          </div>
+        </details>
       </header>
       <ul id="alert-list" class="alert-list" aria-label="Security alerts"></ul>
     </aside>
 
     <section id="alert-pane" class="alert-pane" aria-label="Selected alert">
-      <div id="empty-alert" class="empty-alert">
-        <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>
-        <h2 id="empty-title">Waiting for Alerts</h2>
-        <p id="empty-message">Connecting to Lakeview Fiber.</p>
-      </div>
-      <article id="incident" class="incident" hidden>
+      <header class="detail-toolbar">
         <button id="back-to-alerts" class="back-button" type="button"><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg>Alerts</button>
-        <header class="incident-header">
-          <div class="incident-heading">
-            <p id="incident-meta" class="incident-meta"></p>
-            <h2 id="incident-title" tabindex="-1"></h2>
-            <p id="incident-source" class="incident-source"></p>
-          </div>
-          <details id="actions" class="menu">
-            <summary class="button">Actions<svg class="icon" aria-hidden="true"><use href="#i-down"/></svg></summary>
-            <div id="action-items" class="menu-items"></div>
+        <details id="actions" class="menu response-menu" hidden>
+          <summary class="button"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Actions<svg class="icon down" aria-hidden="true"><use href="#i-down"/></svg></summary>
+          <div id="action-items" class="menu-items"></div>
+        </details>
+        <div class="toolbar-status">
+          <span class="brand">Data Dyepack</span>
+          <span id="conn" class="connection" data-state="connecting" role="status">Connecting</span>
+        </div>
+      </header>
+      <div class="reading-pane">
+        <div id="empty-alert" class="empty-alert">
+          <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>
+          <h2 id="empty-title">Waiting for Alerts</h2>
+          <p id="empty-message">Connecting to Lakeview Fiber.</p>
+        </div>
+        <article id="incident" class="incident" hidden>
+          <header class="incident-header">
+            <div class="incident-symbol" aria-hidden="true"><svg class="icon"><use href="#i-shield"/></svg></div>
+            <div class="incident-heading">
+              <p id="incident-meta" class="incident-meta"></p>
+              <h2 id="incident-title" tabindex="-1"></h2>
+              <p id="incident-source" class="incident-source"></p>
+            </div>
+            <time id="incident-time" class="incident-time"></time>
+          </header>
+          <p id="response-note" class="response-note" hidden></p>
+          <p id="incident-summary" class="incident-summary"></p>
+          <div id="incident-facts"></div>
+          <div id="incident-outcome" role="status"></div>
+          <details id="incident-report" class="disclosure" hidden>
+            <summary>Report</summary>
+            <div id="report-body" class="disclosure-body"></div>
           </details>
-        </header>
-        <p id="response-note" class="response-note" hidden></p>
-        <div id="incident-facts"></div>
-        <div id="incident-outcome" role="status"></div>
-        <details id="incident-report" class="disclosure" hidden>
-          <summary>Report</summary>
-          <div id="report-body" class="disclosure-body"></div>
-        </details>
-        <details id="incident-activity" class="disclosure">
-          <summary>Activity <span id="activity-count" class="disclosure-count"></span></summary>
-          <ol id="incident-events" class="activity-list"></ol>
-        </details>
-      </article>
+          <details id="incident-activity" class="disclosure">
+            <summary>Activity <span id="activity-count" class="disclosure-count"></span></summary>
+            <ol id="incident-events" class="activity-list"></ol>
+          </details>
+        </article>
+      </div>
     </section>
 
     <div id="player" class="player" aria-label="Recorded drill playback" hidden>

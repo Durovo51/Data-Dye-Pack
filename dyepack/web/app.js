@@ -744,6 +744,7 @@ const ALERT_TITLES = {
 };
 const alertTitle = (e) => ALERT_TITLES[e.detail?.reason] || what(e);
 const alertTime = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const alertDate = (ts) => new Date(ts * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
 const alertRows = new Map();
 let selectedAlert = null;
 let renderedAlert = null;
@@ -755,6 +756,15 @@ function severityDot(severity) {
   return dot;
 }
 
+function selectAlert(id, openDetail) {
+  if (selectedAlert !== id) $("toast").hidden = true;
+  selectedAlert = id;
+  customSelection = true;
+  if (openDetail) $("main").dataset.detail = "true";
+  drawIncidents();
+  if (openDetail && matchMedia("(max-width: 700px)").matches) $("incident-title").focus();
+}
+
 function alertRow(inc, active) {
   let row = alertRows.get(inc.id);
   if (!row) {
@@ -762,19 +772,11 @@ function alertRow(inc, active) {
     const button = el("button", "alert-row");
     button.type = "button";
     button.dataset.incident = inc.id;
-    const label = el("span");
-    label.append(el("span", "row-title"), el("span", "row-meta"));
     const arrow = svg("svg", { class: "icon", "aria-hidden": "true" });
     arrow.append(svg("use", { href: "#i-chevron" }));
-    button.append(severityDot(inc.severity), label, el("time", "row-time"), arrow);
-    button.addEventListener("click", () => {
-      if (selectedAlert !== inc.id) $("toast").hidden = true;
-      selectedAlert = inc.id;
-      customSelection = true;
-      $("main").dataset.detail = "true";
-      drawIncidents();
-      if (matchMedia("(max-width: 700px)").matches) $("incident-title").focus();
-    });
+    button.append(severityDot(inc.severity), el("span", "row-title"), el("time", "row-time"),
+      el("span", "row-meta"), el("span", "row-source"), arrow);
+    button.addEventListener("click", () => selectAlert(inc.id, true));
     row.append(button);
     alertRows.set(inc.id, row);
   }
@@ -785,10 +787,12 @@ function alertRow(inc, active) {
   button.setAttribute("aria-current", String(active));
   button.querySelector(".row-title").textContent = alertTitle(headline);
   button.querySelector(".row-meta").textContent = `${cap(inc.severity)} · ${stateOf(inc)}`;
+  button.querySelector(".row-source").textContent = who(headline);
   const time = button.querySelector("time");
   time.dateTime = date.toISOString();
   time.title = date.toLocaleString();
-  time.textContent = alertTime(headline.ts);
+  time.textContent = date.toDateString() === new Date(S.now * 1000).toDateString()
+    ? alertTime(headline.ts) : alertDate(headline.ts);
   return row;
 }
 
@@ -806,12 +810,13 @@ function drawIncidents() {
     if (listElement.contains(focus)) focus.focus({ preventScroll: true });
   }
   $("main").dataset.hasAlerts = String(Boolean(inc));
-  $("alert-count").textContent = list.length ? `${list.filter(open).length} open · ${list.length} total` : "Lakeview Fiber";
+  $("alert-count").textContent = list.length ? `Lakeview Fiber · ${list.filter(open).length} open` : "Lakeview Fiber";
   $("incident").hidden = !inc;
   $("empty-alert").hidden = Boolean(inc);
   if (!inc) return drawStatus();
 
   if (renderedAlert !== inc.id) {
+    $("alert-pane").querySelector(".reading-pane").scrollTop = 0;
     $("actions").open = false;
     $("incident-report").open = false;
     $("incident-activity").open = false;
@@ -820,7 +825,11 @@ function drawIncidents() {
   const alarm = inc.last || inc.alarms[0];
   $("incident-meta").replaceChildren(severityDot(inc.severity), `${cap(inc.severity)} · ${stateOf(inc)}`, ` · ${inc.id}`);
   $("incident-title").textContent = alertTitle(alarm);
-  $("incident-source").textContent = `${who(alarm)} · ${alertTime(alarm.ts)}`;
+  $("incident-source").textContent = who(alarm);
+  const time = $("incident-time");
+  time.dateTime = new Date(alarm.ts * 1000).toISOString();
+  time.textContent = `${alertDate(alarm.ts)} at ${alertTime(alarm.ts)}`;
+  $("incident-summary").textContent = happened(inc);
   $("incident-facts").replaceChildren(triage(inc));
   const outcome = $("incident-outcome");
   const key = JSON.stringify([inc.id, inc.notice, inc.checklist]);
@@ -882,7 +891,6 @@ function triage(inc) {
   const first = inc.alarms.find(serious) || inc.alarms[0];
   const facts = el("dl", "facts");
   const add = (k, v, cls) => v && facts.append(el("dt", "", k), el("dd", cls || "", v));
-  add("Summary", happened(inc));
   add("Exposure", exposure(inc));
   add("Detection", howFast(inc, first));
   add("Locked files", inc.seals.flatMap((seal) => seal.files.map((file) => `${seal.folder}/${file}`)).join(", "));
@@ -1326,9 +1334,11 @@ function drawPrints() {
 const CONN = { connecting: "Connecting", live: "Live", retry: "Reconnecting", down: "Not connected", replay: "Replay" };
 
 function setConn(state) {
-  const c = $("conn");
-  c.dataset.state = state;
-  c.textContent = CONN[state];
+  for (const id of ["conn", "mobile-conn"]) {
+    const indicator = $(id);
+    indicator.dataset.state = state;
+    indicator.textContent = CONN[state];
+  }
   drawStatus();
   dirty("incidents");
 }
@@ -1440,6 +1450,18 @@ tools.addEventListener("close", () => $("app-menu").querySelector("summary").foc
 $("back-to-alerts").addEventListener("click", () => {
   $("main").dataset.detail = "false";
   alertRows.get(selectedAlert)?.firstChild.focus();
+});
+$("alert-list").addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  const row = event.target.closest(".alert-row")?.parentElement;
+  const next = event.key === "ArrowUp" ? row?.previousElementSibling : row?.nextElementSibling;
+  if (!row) return;
+  event.preventDefault();
+  if (next) {
+    const button = next.firstChild;
+    selectAlert(button.dataset.incident, false);
+    button.focus();
+  }
 });
 for (const id of ["incident-report", "incident-activity"]) {
   $(id).addEventListener("toggle", () => { if ($(id).open) drawIncidents(); });
