@@ -192,6 +192,51 @@ class FileSessionTest(unittest.TestCase):
         trip.file_events([{"ts": 6.0, "pid": 9, "process": "python3", "path": decoy, "op": "read"}])
         self.assertEqual([e["detail"]["reason"] for e in events if e["type"] == "alarm"], ["decoy_open"])
 
+
+class GroupTest(unittest.TestCase):
+    def setUp(self):
+        self.events, self.now = [], [1000.0]
+
+        def emit(kind, who, severity, detail):
+            self.events.append({"type": kind, "session": who["id"], "severity": severity, "detail": detail})
+            return self.events[-1]
+
+        self.trip = Tripwire(emit, lambda *a: None, [])
+        self.trip.clock = lambda: self.now[0]
+
+    def alarms(self, reason):
+        return [e for e in self.events if e["type"] == "alarm" and e["detail"]["reason"] == reason]
+
+    def test_one_user_over_five_sessions_reads_as_one(self):
+        sids = [self.trip.staff_login("rep.taylor", "support", f"10.0.1.{i}", True) for i in range(5)]
+        rows = [f"LV{n:08d}" for n in range(150)]
+        # 100 rows now and 50 more 20 s later is 450 a minute for any one session
+        for later, chunk in ((0, rows[:100]), (20, rows[100:])):
+            for i, sid in enumerate(sids):
+                self.now[0] = 1000.0 + later + 4 * i
+                if not self.trip.sessions[sid]["locked"]:
+                    self.trip.read(sid, chunk, "/api/customers")
+        self.assertEqual(len(self.alarms("speed")), 1)
+        self.assertTrue(all(self.trip.sessions[sid]["locked"] for sid in sids))
+        incidents = {e["detail"]["incident"] for e in self.events if e["type"] in ("alarm", "lock")}
+        self.assertEqual(len(incidents), 1)
+
+    def test_one_address_over_three_users_reads_as_one(self):
+        users = ("rep.jordan", "rep.casey", "rep.taylor")
+        sids = [self.trip.staff_login(u, "support", "198.51.100.9", True) for u in users]
+        for i, sid in enumerate(sids):
+            self.now[0] = 1000.0 + 3 * i
+            self.trip.read(sid, [f"LV{i}{n:07d}" for n in range(90)], "/api/customers")
+        self.assertEqual(len(self.alarms("speed")), 1)
+        self.assertTrue(self.trip.sessions[sids[-1]]["locked"])
+
+    def test_human_pace_stays_quiet(self):
+        sid = self.trip.staff_login("rep.casey", "support", "10.0.0.12", True)
+        for i in range(20):
+            self.now[0] = 1000.0 + 3 * i  # one 10 row search every 3 s
+            self.trip.read(sid, [f"LV{i}{n:07d}" for n in range(10)], "/api/customers")
+        self.assertFalse([e for e in self.events if e["type"] == "alarm"])
+
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -241,6 +286,11 @@ class ServerTest(unittest.TestCase):
         cls.logins = json.loads(lab.logins_path().read_text())
         cls.data = data
 
+    def setUp(self):
+        # each test is its own day: no per user or per address history from the one before
+        self.app.trip.groups.clear()
+        self.app.trip.by_actor.clear()
+
     def call(self, method, path, body=None, sid=None, ip=None, raw=False, headers=(), token=True):
         h = {"Content-Type": "application/json", **dict(headers)}
         if token:
@@ -281,7 +331,7 @@ class ServerTest(unittest.TestCase):
 
     def test_human_lookups_raise_no_alarm(self):
         sid = self.login("rep.casey", "10.0.0.12")
-        # support calls come from real customers, so lookups go by their account numbers
+        # support calls come from real customers. lookups go by their account numbers
         with sqlite3.connect(schema.DB_PATH) as con:
             callers = [a for (a,) in con.execute("SELECT account_no FROM customers_clean LIMIT 5")]
         for account in callers:

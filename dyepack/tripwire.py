@@ -41,7 +41,9 @@ class Tripwire:
         self.watch(canaries)
         self.decoys = list(decoys)
         self.sessions, self.incidents = {}, {}
-        self.by_session, self.by_export = {}, {}
+        self.by_session, self.by_export, self.by_actor = {}, {}, {}
+        self.groups = {}  # ("actor", name) or ("ip", address) -> the same counters a session keeps
+        self.clock = time.time  # tests swap in their own
         self.locked_ips, self.revoked, self.revoked_exports = set(), set(), set()
         self.permits, self.exports, self.files = [], {}, {}
         self.checklist = None  # the server hands in the breach notice checklist when it has one
@@ -62,7 +64,7 @@ class Tripwire:
     def _session(self, sid, actor, ip, role):
         s = {"id": sid, "actor": actor, "ip": ip, "role": role, "locked": False,
              "seen": deque(), "tries": deque(), "unknown": deque(), "fast": False,
-             "exposed": 0, "decoys": set(), "touched": set(), "last": time.time()}
+             "exposed": 0, "decoys": set(), "touched": set(), "last": self.clock()}
         self.sessions[sid] = s
         return s
 
@@ -71,7 +73,7 @@ class Tripwire:
         with self.mutex:
             s = next((s for s in self.sessions.values() if s["role"] == "outside" and s["ip"] == ip), None)
             s = s or self._session(self._id("p"), actor, ip, "outside")
-            s["actor"], s["last"] = actor, time.time()
+            s["actor"], s["last"] = actor, self.clock()
             return s
 
     # staff and jobs
@@ -93,39 +95,52 @@ class Tripwire:
     def read(self, sid, accounts, path, export_id=None):
         """After the API hands out rows (their account numbers). Logs the read, then decides on alarms."""
         with self.mutex:
-            s, now, n = self.sessions[sid], time.time(), len(accounts)
+            s, now, n = self.sessions[sid], self.clock(), len(accounts)
             hits = [self.canaries[a] for a in accounts if a in self.canaries]
             s["last"] = now
             s["seen"].append((now, n))
             _trim(s["seen"], now)
             self.reads.append((now, n))
-            if not s["locked"] and export_id is None:
-                s["exposed"] += n - len(hits)  # a download leaves honey locked, so it isn't plaintext
             self.emit("read", s, "info", {"rows": n, "canaries": len(hits), "path": path})
             if s["role"] == "job" or self._permitted(s, now):
                 return  # registered systems and declared digs get logged, never alarmed
-            rate, inc = _rate(s["seen"], now), None
+            if not s["locked"] and export_id is None:
+                # a download leaves honey locked and a permitted dig is no breach. neither counts as plaintext
+                s["exposed"] += n - len(hits)
+            # one person or one address spread over many sessions still reads as one
+            groups = [self.groups.setdefault(key, {"seen": deque(), "touched": set(), "fast": False})
+                      for key in (("actor", s["actor"]), ("ip", s["ip"]))]
+            for g in [s, *groups]:
+                if g is not s:
+                    g["seen"].append((now, n))
+                    _trim(g["seen"], now)
+                g["touched"] |= {c["canary_id"] for c in hits}
+            rate, inc = max(_rate(g["seen"], now) for g in [s, *groups]), None
             fast = rate > schema.SPEED_ROWS_PER_MIN
-            s["touched"] |= {c["canary_id"] for c in hits}
-            # three canaries in one session is no support call, even at a slow pace
-            many = len(s["touched"]) >= 3
-            if fast and not s["fast"]:
-                s["fast"] = True
+            # three canaries is no support call, even at a slow pace
+            many = max(len(g["touched"]) for g in [s, *groups]) >= 3
+            if fast and not any(g["fast"] for g in [s, *groups]):
                 inc = self._alarm(s, "speed", "high", rate=rate, export_id=export_id)
+                for g in [s, *groups]:
+                    g["fast"], g["incident"] = True, inc["id"]
             if hits:
                 ids = [c["canary_id"] for c in hits][:50]
                 inc = self._alarm(s, "canary_touch", "high" if fast or many else "low", ids,
                                   export_id or next(filter(None, map(export_of, hits)), None), rate,
                                   count=len(hits))
-            if (fast or many) and inc and not s["locked"]:
-                self._lock(s, inc, "session")
+            if (fast or many) and not s["locked"]:
+                # whoever keeps a fast user or address going joins the incident that speed opened
+                inc = inc or self.incidents.get(self.by_session.get(s["id"]) or self.by_actor.get(s["actor"])
+                                                or next((g["incident"] for g in groups if g.get("incident")), None))
+                if inc:
+                    self._lock_actor(s, inc)
 
     def add_permit(self, sid, who, table, minutes):
         with self.mutex:
             by = self.sessions[sid]["actor"]
             if by == who:
                 raise ValueError("a dig permit needs someone else to sign off")
-            until = time.time() + minutes * 60
+            until = self.clock() + minutes * 60
             self.permits.append({"who": who, "table": table, "until": until, "by": by})
             return until
 
@@ -140,7 +155,7 @@ class Tripwire:
         with self.mutex:
             if ip in self.locked_ips:
                 return False
-            s, now = self._outside(ip, user), time.time()
+            s, now = self._outside(ip, user), self.clock()
             s["tries"].append((now, 1))
             _trim(s["tries"], now)
             self.emit("login", s, "info", {"user": user, "ok": ok, "where": "portal"})
@@ -179,7 +194,7 @@ class Tripwire:
                     continue
                 path, name = str(e.get("path") or ""), Path(str(e.get("process") or "unknown")).name
                 key = "f-" + "-".join(str(x) for x in (host, pid if pid is not None else name) if x)
-                now = float(e.get("ts") or time.time())
+                now = float(e.get("ts") or self.clock())
                 s = self.files.get(key)
                 inc = self.incidents.get(self.by_session.get(s["id"])) if s else None
                 # a process quiet for a minute or with a closed incident starts fresh. linux events
@@ -206,11 +221,12 @@ class Tripwire:
     # incidents
 
     def _alarm(self, s, reason, severity, canary_ids=(), export_id=None, rate=None, path=None, count=None):
-        iid = self.by_session.get(s["id"]) or self.by_export.get(export_id)
+        person = s["actor"] if s.get("role") == "support" else None
+        iid = self.by_session.get(s["id"]) or self.by_actor.get(person) or self.by_export.get(export_id)
         inc = self.incidents.get(iid)
         opened = inc is None or inc["status"] == "dismissed"
         if opened:
-            inc = {"id": self._id("inc"), "severity": severity, "status": "open", "opened": time.time(),
+            inc = {"id": self._id("inc"), "severity": severity, "status": "open", "opened": self.clock(),
                    "session": s["id"], "actor": s["actor"], "ip": s["ip"], "sessions": [],
                    "export_id": None, "canary_ids": [], "reasons": [], "locked": False}
             self.incidents[inc["id"]] = inc
@@ -226,6 +242,8 @@ class Tripwire:
             inc["export_id"] = export_id
             self.by_export[export_id] = inc["id"]
         self.by_session[s["id"]] = inc["id"]
+        if person:
+            self.by_actor[person] = inc["id"]  # every session of one support login is one incident
         # the id list stays short for the stream. canary_count says how many there really were
         detail = {"reason": reason, "incident": inc["id"], "canary_ids": list(canary_ids),
                   "canary_count": len(canary_ids) if count is None else count,
@@ -235,6 +253,15 @@ class Tripwire:
         alarm = self.emit("alarm", s, severity, detail)
         self.changed(inc, alarm, opened, escalated)
         return inc
+
+    def _lock_actor(self, s, inc):
+        # every open session of that person goes, not only the one that tripped
+        for other in list(self.sessions.values()):
+            if other["actor"] == s["actor"] and other["role"] == s["role"] and not other["locked"]:
+                if other["id"] not in inc["sessions"]:
+                    inc["sessions"].append(other["id"])
+                self.by_session[other["id"]] = inc["id"]
+                self._lock(other, inc, "session")
 
     def _lock(self, s, inc, what):
         s["locked"] = inc["locked"] = True
@@ -279,12 +306,14 @@ class Tripwire:
                 for s in sessions:
                     s["locked"], s["fast"], s["touched"] = False, False, set()
                     self.locked_ips.discard(s["ip"])
+                    self.groups.pop(("actor", s["actor"]), None)
+                    self.groups.pop(("ip", s["ip"]), None)
             self.emit("action", by, "info", detail)
             return detail
 
     def tick(self):
         with self.mutex:
-            now = time.time()
+            now = self.clock()
             while self.reads and self.reads[0][0] < now - 10:
                 self.reads.popleft()
             active = sum(1 for s in self.sessions.values() if s["last"] >= now - WINDOW and not s["locked"])
