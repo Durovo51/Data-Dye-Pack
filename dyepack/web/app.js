@@ -6,6 +6,17 @@ const CANARIES = 200;
 const VEINS = 5;
 const WINDOW = 180; // seconds on the speed chart
 const REPLAY = new URLSearchParams(location.search).has("replay");
+// control token for respond and alert route changes: read once from ?token= then dropped from the address bar
+const TOKEN = (() => {
+  const q = new URLSearchParams(location.search);
+  const t = q.get("token") || "";
+  if (q.has("token")) {
+    q.delete("token");
+    const rest = q.toString();
+    history.replaceState(null, "", `${location.pathname}${rest ? `?${rest}` : ""}${location.hash}`);
+  }
+  return t;
+})();
 const ALL = ["status", "chart", "mine", "drive", "feed", "incidents", "score", "prints", "phone"];
 const RANK = { info: 0, low: 1, high: 2, critical: 3 };
 const ROUTES = { critical: ["push", "sms"], high: ["push"], low: [] };
@@ -14,27 +25,29 @@ const CHANNELS = { push: "Phone push", sms: "SMS", email: "Email", discord: "Dis
 const ACTIONS = {
   lock: ["Lock", "Locked", "Locked from the dashboard"],
   revoke: ["Revoke key", "Key revoked", "Revoked the stolen key"],
-  notify_customers: ["Notify affected customers", "Customers notified", "Sent notices to the affected customers"],
+  notify_customers: ["Draft breach notice", "Notice drafted", "Drafted a breach notice"],
   dismiss: ["Dismiss", "Dismissed", "Marked as a false alarm"],
 };
-// the demo drive from the sentinel brief. other files show up once they get opened
+// the demo drive from drive.py (no route lists it yet). decoys sort first in their folders
+// like they do on disk. other files show up once they get opened
 const DRIVE = [
-  ["customers", ["customers.csv", "customers_full_export_2026.csv"]],
-  ["billing", ["invoices_2026_10.json"]],
+  ["customers", ["all_customers_full_export_2026.csv", "customers.csv"]],
+  ["billing", ["all_accounts_2026_with_payment_info.json", "invoices_2026_10.json"]],
   ["support", ["notes.md"]],
-  ["backups", ["customers_backup_unencrypted.csv", "nightly_2026_11_13.dye"]],
+  ["backups", ["all_customers_backup_unencrypted.csv", "nightly_2026_11_13.dye"]],
   ["config", [".env.production"]],
 ];
-const DECOYS = ["customers_full_export_2026.csv", "customers_backup_unencrypted.csv", ".env.production"];
+const DECOYS = ["all_customers_full_export_2026.csv", "all_accounts_2026_with_payment_info.json", "all_customers_backup_unencrypted.csv", ".env.production"];
 
 const $ = (id) => document.getElementById(id);
 const fmt = (n) => Math.round(n).toLocaleString("en-US");
 // seconds above one, milliseconds below
-function dur(s, short) {
+function dur(s, short, coarse) {
   s = Math.max(0, Number(s) || 0);
   if (s >= 0.9995) return `${s.toFixed(1)} s`;
   const ms = Math.round(s * 1000);
-  return ms ? `${ms} ms` : short ? "<1 ms" : "under 1 ms";
+  const floor = coarse ? 5 : 1; // drill times come in hundredths. their zero means under 5 ms
+  return ms ? `${ms} ms` : short ? `<${floor} ms` : `under ${floor} ms`;
 }
 const later = (s) => (s < 0.0005 ? "at the same moment" : `${dur(s)} later`);
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : "");
@@ -154,6 +167,7 @@ function fresh() {
     incidents: new Map(), exports: new Map(),
     feed: [], notes: [], score: {},
     hits: new Set(), flash: [], pings: [], bursts: [], booms: [],
+    copies: new Map(), // session -> honey locked exports it downloaded
     lastHold: null,
     live: { normalAlarms: 0, firstRead: null, exposed: 0 },
     timed: {}, // heist-1 and agent: when the step started, its incident, its time to catch
@@ -209,6 +223,13 @@ function touch(s, k) {
 }
 
 function tableRead(e, d) {
+  if (String(d.path || "").startsWith("/api/exports/")) {
+    // a download of a honey locked export: the copy leaves as a crate, the mine isn't dug
+    const list = S.copies.get(e.session) || [];
+    list.push({ id: fileName(d.path), real: Math.max(0, (d.rows || 0) - (d.canaries || 0)) });
+    S.copies.set(e.session, list);
+    return dirty("incidents");
+  }
   let s = S.sessions.get(e.session);
   if (!s) S.sessions.set(e.session, (s = { actor: e.actor, rows: 0, canaries: 0, vein: S.sessions.size % VEINS }));
   touch(s, d.canaries || 0);
@@ -315,7 +336,7 @@ function handle(e) {
         f.sealed = true;
         f.lockedAs = file;
       }
-      incident(d.incident).seals.push({ folder: name, ts: e.ts });
+      incident(d.incident).seals.push({ folder: name, ts: e.ts, files: d.files || [] });
       S.bursts.push(name);
       S.feed.unshift(e);
       dirty("drive", "feed", "incidents");
@@ -328,7 +349,11 @@ function handle(e) {
       break;
     case "action": {
       const inc = incident(d.incident);
-      if (inc.actions.has(d.action)) break; // already shown, like a click the server echoes back
+      if (Array.isArray(d.checklist)) inc.checklist = d.checklist;
+      if (inc.actions.has(d.action)) {
+        dirty("incidents"); // already shown, like a click the server echoes back
+        break;
+      }
       inc.actions.add(d.action);
       if (d.action === "dismiss") inc.dismissed = true;
       if (d.action === "lock") inc.locked = true;
@@ -707,7 +732,7 @@ function drawDrive() {
   if (p) {
     const fast = p.peak > SPEED_FILES_PER_MIN;
     pace.dataset.pace = fast ? "machine" : "human";
-    pace.textContent = fast ? "Machine speed: likely an AI agent" : "Human speed: likely a person";
+    pace.textContent = fast ? "Machine speed: a script or AI agent" : "Human speed: likely a person";
   }
 }
 
@@ -768,6 +793,7 @@ function incidentCard(inc) {
   const head = el("div", "inc-head");
   head.append(el("span", `chip ${inc.severity}`, inc.severity), el("strong", "", inc.id), el("span", "inc-state", stateOf(inc)));
   card.append(head, triage(inc), reportBlock(inc), respond(inc));
+  if (inc.checklist) card.append(checklistCard(inc));
   return card;
 }
 
@@ -777,6 +803,7 @@ function folded(inc) {
   det.addEventListener("toggle", () => (det.open ? unfolded.add(inc.id) : unfolded.delete(inc.id)));
   const title = inc.report?.title || what(inc.last || inc.alarms[0]);
   det.append(el("summary", "", `${inc.id} · ${title} · ${stateOf(inc)}`), triage(inc), reportBlock(inc), respond(inc));
+  if (inc.checklist) det.append(checklistCard(inc));
   return det;
 }
 
@@ -796,8 +823,9 @@ function triage(inc) {
   add("What happened", happened(inc));
   add("How fast", howFast(inc, first));
   const [pace, cls] = paceOf(inc);
-  add("AI agent or person", pace, cls);
+  add("Script or person", pace, cls);
   add("Real data exposed", exposure(inc));
+  add("Locked in place", inc.seals.map((x) => (x.files.length ? x.files.map((f) => `${x.folder}/${f}`).join(", ") : `${x.folder}/`)).join(", "));
   add("Next step", r ? nextStep(r.text) : "Waiting for the report.");
   add("Alerts sent", [...new Map(inc.notes.map((n) => [n.detail.channel, n.detail.status]))].map(([c, st]) => `${CHANNELS[c] || c} ${st}`).join(" · "));
   box.append(el("p", "triage-title", r?.source === "databricks" ? "AI triage" : "Triage"), facts);
@@ -834,13 +862,31 @@ function happened(inc) {
   return `${cap(text)}${exp ? ` from export ${exp}` : ""}.`;
 }
 
+// the breach notice checklist from a notify_customers action. drafted only, nothing gets sent
+function checklistCard(inc) {
+  const box = el("div", "triage");
+  const facts = el("dl", "facts");
+  for (const it of inc.checklist) {
+    const item = it && typeof it === "object" ? it : { step: it };
+    const due = item.due ?? item.by ?? item.date ?? item.deadline;
+    facts.append(el("dt", "", due != null ? dateText(due) : "To do"), el("dd", "", String(item.step ?? item.text ?? item.task ?? item.title ?? "")));
+  }
+  box.append(el("p", "triage-title", "Breach notice checklist"), el("p", "empty", "Lab guidance, not legal advice"), facts);
+  return box;
+}
+
+function dateText(v) {
+  const d = typeof v === "number" ? new Date(v * 1000) : /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(`${v}T12:00:00`) : new Date(v);
+  return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+}
+
 function howFast(inc, first) {
   const starts = [...inc.sessions].map((s) => S.firstRead.get(s) ?? S.first.get(s)).filter((t) => t != null);
   const start = starts.length ? Math.min(...starts) : first.ts;
   // an incident a drill step timed uses that step's number, same as the scoreboard
   const step = Object.keys(S.timed).find((p) => S.timed[p].inc === inc.id);
   const drilled = step ? stepTime(step) : null;
-  let out = `Caught in ${dur(drilled ?? first.ts - start)}`;
+  let out = `Caught in ${drilled != null ? dur(drilled, false, true) : dur(first.ts - start)}`;
   if (inc.seals[0]) out += `, files locked ${later(inc.seals[0].ts - first.ts)}`;
   if (inc.firstHold) out += `, ${inc.firstHold.type === "lock" ? "locked" : "contained"} ${later(inc.firstHold.ts - first.ts)}`;
   return `${out}.`;
@@ -859,9 +905,9 @@ function paceOf(inc) {
   const looks = inc.report?.looks_like || (speed ? (fast ? "ai_agent" : "person") : null);
   if (!looks) return [null];
   const agent = looks === "ai_agent";
-  let text = agent ? "Likely an AI agent" : "Likely a person";
-  if (speed && fast) text = agent ? "Machine speed: likely an AI agent" : "Machine speed. The report still says a person";
-  if (speed && !fast) text = agent ? "Human speed. The report still says an AI agent" : "Human speed: likely a person";
+  let text = agent ? "Likely a script or AI agent" : "Likely a person";
+  if (speed && fast) text = agent ? "Machine speed: a script or AI agent" : "Machine speed. The report still says a person";
+  if (speed && !fast) text = agent ? "Human speed. The report still says a script or AI agent" : "Human speed: likely a person";
   return [speed ? `${text} (${speed})` : text, agent ? "machine" : "human"];
 }
 
@@ -880,6 +926,9 @@ function exposure(inc) {
   }
   const out = [];
   if (rows != null) out.push(`${fmt(rows)} real customer ${rows === 1 ? "row" : "rows"}${inc.locked ? " before the lock" : " so far"}`);
+  for (const sid of inc.sessions) {
+    for (const c of S.copies.get(sid) || []) out.push(`${fmt(c.real)} real customer rows in honey locked export ${c.id}`);
+  }
   if (drive && files.size) out.push(`${files.size} real customer ${files.size === 1 ? "file" : "files"}: ${[...files].join(", ")}`);
   else if (drive) out.push(inc.seals.length ? "None. The customer files were locked first" : "None so far");
   return out.length ? `${out.join(". ")}.` : null;
@@ -935,6 +984,15 @@ function respond(inc) {
   return bar;
 }
 
+function post(path, body) {
+  const headers = { "Content-Type": "application/json" };
+  if (TOKEN) headers["X-Dyepack-Token"] = TOKEN;
+  return fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+}
+
+const refused = (r) => r.status === 401 || r.status === 403;
+const TOKEN_HELP = "The server turned this down. Open the map with its control token link.";
+
 async function act(id, action) {
   const e = { ts: S.now, type: "action", session: "dashboard", actor: "you", ip: "", severity: "info", detail: { incident: id, action } };
   if (REPLAY) return handle(e);
@@ -942,11 +1000,15 @@ async function act(id, action) {
   sending.add(key);
   dirty("incidents");
   try {
-    const r = await fetch("/api/respond", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ incident: id, action }) });
+    const r = await post("/api/respond", { incident: id, action });
+    if (refused(r)) throw new Error(TOKEN_HELP);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const back = await r.json().catch(() => ({}));
+    const list = back?.checklist ?? back?.detail?.checklist;
+    if (Array.isArray(list)) e.detail.checklist = list;
     handle(e);
-  } catch {
-    toast("Couldn't reach the server. Nothing changed. Try again.");
+  } catch (err) {
+    toast(err.message === TOKEN_HELP ? TOKEN_HELP : "Couldn't reach the server. Nothing changed. Try again.");
   }
   sending.delete(key);
   dirty("incidents");
@@ -1047,13 +1109,14 @@ async function saveRoute(box) {
   routes[sev] = Object.keys(CHANNELS).filter((c) => on.has(c));
   if (REPLAY) return;
   try {
-    const r = await fetch("/api/alert-routes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(routes) });
+    const r = await post("/api/alert-routes", routes);
+    if (refused(r)) throw new Error(TOKEN_HELP);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     $("routes-note").textContent = "Saved.";
-  } catch {
+  } catch (err) {
     routes = before;
     drawRoutes();
-    toast("Couldn't save the alert routes. Is the server running?");
+    toast(err.message === TOKEN_HELP ? TOKEN_HELP : "Couldn't save the alert routes. Is the server running?");
   }
 }
 
@@ -1084,7 +1147,7 @@ function tileText(key, v) {
     case "normal_alarms":
       return [fmt(v), "Goal: 0", v > 0 ? "fail" : S.phases.normal === "end" ? "pass" : ""];
     case "detect_seconds":
-      return [dur(v, true), "Goal: 10 s or less", v <= 10 ? "pass" : "fail"];
+      return [dur(v, true, true), "Goal: 10 s or less", v <= 10 ? "pass" : "fail"];
     case "rows_exposed":
       return [fmt(v), `${((100 * v) / TABLE_ROWS).toFixed(1)}% of the table before the lock`, ""];
     case "guesses_cracked":
@@ -1093,7 +1156,7 @@ function tileText(key, v) {
       // pick and real come in counted from 0
       if (typeof v !== "object") return [String(v), "", ""];
       const of = v.lists ? ` of ${v.lists}` : "";
-      if (v.pick == null) return ["No pick", "It couldn't choose a list", "pass"];
+      if (v.pick == null) return ["No answer", "No model gave a pick this run", ""];
       if (v.real == null) return [`List ${v.pick + 1}`, `Its pick${of}`, ""];
       if (v.pick === v.real) return ["Yes", `Lucky guess: a 1 in ${v.lists || "?"} chance`, "fail"];
       return ["No", `It picked list ${v.pick + 1}. The real one was list ${v.real + 1}${of}.`, "pass"];
@@ -1167,8 +1230,11 @@ async function replay() {
     return;
   }
   if (!events.length) return;
-  events.sort((a, b) => a.ts - b.ts);
-  const t0 = events[0].ts, total = events.at(-1).ts - t0;
+  // "at" is when an event plays in replay seconds. quiet stretches go faster, ts stays real
+  const t0 = Math.min(...events.map((e) => e.ts));
+  const when = (e) => e.at ?? e.ts - t0;
+  events.sort((a, b) => when(a) - when(b));
+  const total = when(events.at(-1));
   const play = $("play");
   let i = 0, at = 0, speed = 1, playing = true, last = performance.now();
   const label = () => (play.textContent = i >= events.length ? "Play again" : playing ? "Pause" : "Play");
@@ -1198,7 +1264,7 @@ async function replay() {
     const now = performance.now();
     if (playing) at = Math.min(total, at + ((now - last) / 1000) * speed);
     last = now;
-    while (i < events.length && events[i].ts - t0 <= at) handle(events[i++]);
+    while (i < events.length && when(events[i]) <= at) handle(events[i++]);
     if (i >= events.length && playing) {
       playing = false;
       label();
