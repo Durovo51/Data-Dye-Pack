@@ -1,0 +1,159 @@
+"""Can statistics pick the real list out of cracked copies? Lock real rows, open them with
+wrong passwords and score every list the way a careful thief would.
+"""
+
+import json
+import math
+import secrets
+import sqlite3
+import sys
+from collections import Counter
+
+from . import honey, schema, vocab
+from .profile import build_profile
+
+ROUNDS = 1_000  # pbkdf2 rounds only slow a thief down, the scores don't depend on them
+SMALL = 2_000  # below this a table profiled from itself leaks through rare values
+CATS = [name for name, kind in vocab.PARTS if kind == "cat"]
+TESTS = ("chi_square", "g_test", "likelihood")
+LABELS = {"chi_square": "value counts, chi square", "g_test": "value counts, G test",
+          "likelihood": "likelihood"}
+
+
+def score(parts, weights):
+    """(chi square, G test, log likelihood) of one list's parts against the header weights."""
+    chi = g = likely = 0.0
+    for name in CATS:
+        w = weights[name]
+        total = sum(w.values())
+        got = Counter(p[name] for p in parts)
+        for v, x in w.items():
+            expect, n = len(parts) * x / total, got[v]
+            chi += (n - expect) ** 2 / expect
+            if n:
+                g += 2 * n * math.log(n / expect)
+                likely += n * math.log(x / total)
+    return chi, g, likely
+
+
+def repeats(parts):
+    # the real table never repeats these, so any repeat would mark a fake
+    accounts = {p["account"] for p in parts}
+    logins = {(vocab._user_base(p["user_style"], p["first_name"], p["last_name"]), p["user_dd"])
+              for p in parts}
+    return 2 * len(parts) - len(accounts) - len(logins)
+
+
+def prove(rows, profile, fakes=99, password=None, naive=False):
+    """Lock rows, open them with `fakes` random wrong passwords and score all the lists.
+    Returns the real list's rank on each check, 1 being the lowest score of the lot.
+    If the real list blends in, every rank is as likely as any other. naive=True locks
+    with exact counts in the header instead, for the side by side demo."""
+    if fakes < 1:
+        raise ValueError("needs at least one wrong password")
+    if not rows:
+        raise ValueError("needs at least one customer")
+    password = password or secrets.token_urlsafe(16)
+    if naive:
+        blob = _naive_lock(rows, password, profile)
+    else:
+        blob = honey.lock(rows, password, profile, iterations=ROUNDS)
+    if honey.open_locked(blob, password) != rows:
+        raise RuntimeError("the right password didn't give the rows back")
+    guesses = set()
+    while len(guesses) < fakes:
+        guess = secrets.token_urlsafe(9)
+        if guess != password:
+            guesses.add(guess)
+    weights = honey._read(blob)[0]["parts"]
+    opened = _opened(blob, [password, *guesses])
+    real = next(opened)
+    mine, theirs, fake_repeats = score(real, weights), [], 0
+    for parts in opened:  # score each fake and let it go, 100 lists don't need to sit in memory
+        theirs.append(score(parts, weights))
+        fake_repeats += repeats(parts)
+    return {
+        "rows": len(rows),
+        "lists": fakes + 1,
+        "rank": {t: 1 + sum(s[i] < mine[i] for s in theirs) for i, t in enumerate(TESTS)},
+        "repeats": {"real": repeats(real), "fakes": fake_repeats},
+    }
+
+
+def _opened(blob, passwords):
+    # what each password opens, as parts. open_locked builds rows from these same parts, and
+    # parsing them back gives the same parts (no name pair in the vocab makes a style ambiguous),
+    # so scoring parts skips work that cancels out
+    head, body = honey._read(blob)
+    salt = bytes.fromhex(head["salt"])
+    for pw in passwords:
+        codec = honey._Codec(head["parts"])
+        plain = honey._xor(body, honey._key(pw, salt, head["iterations"]))
+        yield [codec.decode(s) for s in honey.ROW.iter_unpack(plain)]
+
+
+def _naive_lock(rows, password, profile):
+    # the obvious design, only for the demo: exact profile counts in the header, the rest of
+    # the lock unchanged. never use it for a real export
+    parts = [vocab.decompose(r) for r in rows]
+    weights = {name: {**dict.fromkeys({p[name] for p in parts}, 1),
+                      **{v: max(1, c) for v, c in profile["parts"][name].items()}} for name in CATS}
+    salt = secrets.token_bytes(16)
+    head = {"salt": salt.hex(), "iterations": ROUNDS, "rows": len(parts), "parts": weights}
+    codec = honey._Codec(weights)
+    rand = iter(memoryview(secrets.token_bytes(8 * len(vocab.PARTS) * len(parts))).cast("Q"))
+    plain = b"".join(honey.ROW.pack(*codec.encode(p, rand)) for p in parts)
+    scrambled = honey._xor(plain, honey._key(password, salt, ROUNDS))
+    return b"\n".join([honey.MAGIC, json.dumps(head).encode(), scrambled])
+
+
+def cmd_prove(args):
+    want, fakes = getattr(args, "rows", None) or 2000, getattr(args, "fakes", None) or 99
+    compare = getattr(args, "compare", False)
+    if not schema.DB_PATH.exists():
+        print(f"no lab table at {schema.DB_PATH}, run dyepack lab first", file=sys.stderr)
+        return 1
+    try:
+        con = sqlite3.connect(schema.DB_PATH)
+        try:
+            cur = con.execute(f"SELECT {', '.join(schema.CUSTOMER_FIELDS)} FROM customers")
+            table = [dict(zip(schema.CUSTOMER_FIELDS, r)) for r in cur]
+        finally:
+            con.close()
+        profile = json.loads(schema.PROFILE_PATH.read_text()) if schema.PROFILE_PATH.exists() else None
+    except (sqlite3.Error, ValueError) as e:
+        print(f"can't read the lab: {e}", file=sys.stderr)
+        return 1
+    rows = secrets.SystemRandom().sample(table, min(max(1, want), len(table)))
+    try:
+        if compare:
+            # lock the sample as if it were the whole table, like a full export, so the exact
+            # counts come from these very rows. same rows and setup, only the header differs
+            own = build_profile(rows)
+            plain, ours = prove(rows, own, fakes, naive=True), prove(rows, own, fakes)
+        else:
+            result = prove(rows, profile, fakes)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
+    if compare:
+        print(f"locked the same {len(rows):,} customers two ways, each opened with {fakes} wrong passwords")
+        print(f"where the real list ranks among {fakes + 1} lists (1 = lowest score)")
+        print(f"  {'':<26}{'exact counts':<15}ours")
+        for test in TESTS:
+            print(f"  {LABELS[test]:<26}{plain['rank'][test]:<15}{ours['rank'][test]}")
+        print("a giveaway sits at 1 every time. ours lands somewhere new every run.")
+        if len(rows) < SMALL:
+            print(f"note: a table under {SMALL:,} rows profiled from itself shows its rare values "
+                  "(the real list holds every one, fakes skip some), so ours can sit low. "
+                  "real exports use the whole table's profile.")
+        return 0
+    n = result["lists"]
+    print(f"locked {result['rows']:,} customers, then opened the file with {n - 1} wrong passwords")
+    print(f"can a thief's statistics find the real list among all {n}? (rank 1 = lowest score)")
+    for test, rank in result["rank"].items():
+        print(f"  {LABELS[test]:<26}real list ranked {rank} of {n}")
+    print(f"  {'repeated accounts, logins':<26}{result['repeats']['real']} in the real list, "
+          f"{result['repeats']['fakes']} across the fakes")
+    print("a giveaway would rank 1 or last every run. a list that blends in lands anywhere.")
+    return 0
