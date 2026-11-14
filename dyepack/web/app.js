@@ -6,16 +6,20 @@ const CANARIES = 200;
 const VEINS = 5;
 const WINDOW = 180; // seconds on the speed chart
 const REPLAY = new URLSearchParams(location.search).has("replay");
-// control token for respond and alert route changes: read once from ?token= then dropped from the address bar
-const TOKEN = (() => {
+// Keep the server's control link out of the address bar and retain access in this tab.
+let controlToken = (() => {
   const q = new URLSearchParams(location.search);
-  const t = q.get("token") || "";
+  let token = q.get("token");
+  try {
+    if (token) sessionStorage.setItem("dyepack.control", token);
+    else if (token === null) token = sessionStorage.getItem("dyepack.control");
+  } catch { /* the link still works when tab storage is unavailable */ }
   if (q.has("token")) {
     q.delete("token");
     const rest = q.toString();
     history.replaceState(null, "", `${location.pathname}${rest ? `?${rest}` : ""}${location.hash}`);
   }
-  return t;
+  return token || "";
 })();
 const ALL = ["status", "chart", "mine", "drive", "feed", "incidents", "score", "prints", "phone"];
 const RANK = { info: 0, low: 1, high: 2, critical: 3 };
@@ -23,10 +27,10 @@ const ROUTES = { critical: ["push", "sms"], high: ["push"], low: [] };
 const CHANNELS = { push: "Phone push", sms: "SMS", email: "Email", discord: "Discord" };
 // button, done label, feed line
 const ACTIONS = {
-  lock: ["Lock", "Locked", "Locked from the dashboard"],
-  revoke: ["Revoke key", "Key revoked", "Revoked the stolen key"],
-  notify_customers: ["Draft breach notice", "Notice drafted", "Drafted a breach notice"],
-  dismiss: ["Dismiss", "Dismissed", "Marked as a false alarm"],
+  lock: ["Lock access", "Access locked", "Requested an access lock", "Block the associated staff sessions or portal addresses."],
+  revoke: ["Revoke access", "Access revoked", "Revoked access", "Block sign-ins for affected staff accounts or downloads of the associated export."],
+  notify_customers: ["Prepare breach notice", "Notice details ready", "Prepared breach notice details"],
+  dismiss: ["Dismiss incident", "Dismissed", "Dismissed the incident", "Mark the incident as a false alarm and release its session or address locks."],
 };
 // the demo drive from drive.py (no route lists it yet). decoys sort first in their folders
 // like they do on disk. other files show up once they get opened
@@ -104,11 +108,11 @@ const MARKERS = (() => {
 
 const REASONS = {
   canary_touch: (d) => {
-    const n = d.canary_ids?.length || 1;
+    const n = d.canary_count ?? (d.canary_ids?.length || 1);
     return n === 1 ? "Touched a canary customer" : `Touched ${n} canary customers`;
   },
   speed: (d, e) => {
-    const unit = S.procs.has(e.session) ? "files" : "rows";
+    const unit = S.procs.has(e.session) ? "files" : e.session?.startsWith("p-") ? "login attempts" : "rows";
     return d.rate_per_min ? `Tripped the speed alarm at ${fmt(d.rate_per_min)} ${unit} a minute` : "Tripped the speed alarm";
   },
   canary_login: () => "Tried to log in as a canary customer",
@@ -148,6 +152,10 @@ function lockText(e) {
 
 function holdText(e) {
   if (e.type === "action") return `${ACTIONS[e.detail.action]?.[2] || cap(e.detail.action)} · ${e.detail.incident}`;
+  if (e.type === "burst") {
+    const n = e.detail.files.length;
+    return `${fmt(n)} ${n === 1 ? "file" : "files"} locked in ${fileName(e.detail.folder)}.`;
+  }
   return e.detail?.what === "ip" ? lockText(e) : `${lockText(e)} · ${who(e)}`;
 }
 
@@ -156,7 +164,7 @@ function holdText(e) {
 let S;
 function fresh() {
   S = {
-    now: 0, rate: 0, ticks: [], seen: 0,
+    now: 0, rate: null, activeSessions: null, ticks: [], seen: 0,
     phases: {}, phase: null,
     sessions: new Map(), // table readers, each digs a tunnel
     first: new Map(), // session -> first event
@@ -168,7 +176,6 @@ function fresh() {
     feed: [], notes: [], score: {},
     hits: new Set(), flash: [], pings: [], bursts: [], booms: [],
     copies: new Map(), // session -> honey locked exports it downloaded
-    lastHold: null,
     live: { normalAlarms: 0, firstRead: null, exposed: 0 },
     timed: {}, // heist-1 and agent: when the step started, its incident, its time to catch
   };
@@ -201,9 +208,11 @@ function incident(id = "unknown") {
 }
 
 function hold(inc, e) {
-  inc.heldAt = e.ts;
+  if (!inc.lastHold || e.ts >= inc.lastHold.ts) {
+    inc.heldAt = e.ts;
+    inc.lastHold = e;
+  }
   inc.firstHold ??= e;
-  S.lastHold = e;
 }
 
 // light up the next k canaries along this reader's tunnel
@@ -305,10 +314,11 @@ function handle(e) {
   if (e.type === "read" && e.session && !S.firstRead.has(e.session)) S.firstRead.set(e.session, e.ts);
   switch (e.type) {
     case "tick":
-      S.rate = d.reads_per_min || 0;
-      S.ticks.push([e.ts, S.rate]);
+      S.rate = d.reads_per_min ?? null;
+      S.activeSessions = d.sessions ?? null;
+      if (S.rate != null) S.ticks.push([e.ts, S.rate]);
       while (S.ticks.length && S.ticks[0][0] < S.now - WINDOW - 5) S.ticks.shift();
-      dirty("chart", "drive", "phone");
+      dirty("status", "chart", "drive");
       break;
     case "read":
       if (d.process != null || d.files_per_min != null) fileRead(e, d);
@@ -319,6 +329,7 @@ function handle(e) {
       break;
     case "lock": {
       const inc = incident(d.incident);
+      if (e.session) inc.sessions.add(e.session);
       inc.locked = true;
       hold(inc, e);
       const s = S.sessions.get(e.session);
@@ -336,10 +347,12 @@ function handle(e) {
         f.sealed = true;
         f.lockedAs = file;
       }
-      incident(d.incident).seals.push({ folder: name, ts: e.ts, files: d.files || [] });
+      const inc = incident(d.incident);
+      inc.seals.push({ folder: name, ts: e.ts, files: d.files || [] });
+      if (d.files?.length) hold(inc, e);
       S.bursts.push(name);
       S.feed.unshift(e);
-      dirty("drive", "feed", "incidents");
+      dirty("status", "drive", "feed", "incidents");
       break;
     }
     case "notify":
@@ -350,16 +363,26 @@ function handle(e) {
     case "action": {
       const inc = incident(d.incident);
       if (Array.isArray(d.checklist)) inc.checklist = d.checklist;
+      if (d.action === "notify_customers" && Number.isFinite(d.customers)) {
+        inc.notice = { customers: d.customers, plaintext_rows: d.plaintext_rows,
+          locked_copies: d.locked_copies };
+      }
       if (inc.actions.has(d.action)) {
         dirty("incidents"); // already shown, like a click the server echoes back
         break;
       }
       inc.actions.add(d.action);
-      if (d.action === "dismiss") inc.dismissed = true;
-      if (d.action === "lock") inc.locked = true;
-      if (d.action === "lock" || d.action === "revoke") hold(inc, e);
+      if (d.action === "dismiss") {
+        inc.dismissed = true;
+        inc.locked = false;
+        for (const sid of inc.sessions) {
+          const s = S.sessions.get(sid);
+          if (s) s.locked = false;
+        }
+      }
+      if (d.action === "revoke" && d.revoked?.length) hold(inc, e);
       S.feed.unshift(e);
-      dirty("status", "feed", "incidents");
+      dirty("status", "feed", "incidents", "mine");
       break;
     }
     case "export":
@@ -409,40 +432,41 @@ function flush() {
   for (const p of ALL) if (parts.has(p)) draw[p]();
 }
 
-const WORDS = { clear: "All clear", alarm: "Alarm", locked: "Locked" };
-let lastMood = "clear";
-
 function drawStatus() {
-  let open = null, held = false, dismissed = false;
+  let open = null, held = null, openCount = 0;
   for (const i of S.incidents.values()) {
-    if (i.dismissed) dismissed = true;
-    else if (i.alarmAt != null && (i.heldAt == null || i.heldAt < i.alarmAt)) {
-      if (!open || i.alarmAt > open.alarmAt) open = i;
-    } else if (i.heldAt != null) held = true;
+    const state = stateOf(i);
+    if (state === "Open") {
+      openCount++;
+      const latest = i.last || i.alarms.at(-1);
+      if (!open || RANK[latest.severity] > RANK[open.severity] ||
+          (latest.severity === open.severity && latest.ts > open.ts)) open = latest;
+    } else if (state === "Contained" && (!held || i.heldAt > held.ts)) held = i.lastHold;
   }
-  const m = open ? "alarm" : held ? "locked" : "clear";
-  const box = $("status");
-  box.dataset.state = m;
-  $("status-word").textContent = WORDS[m];
-  let line = !S.seen ? "Waiting for the first events." : dismissed ? "No open alarms." : "No alarms so far.";
-  if (open) line = `${what(open.last)} · ${who(open.last)}`;
-  else if (held && S.lastHold) line = holdText(S.lastHold);
-  $("status-line").textContent = line;
-  document.body.dataset.mood = m;
-  if (m === "alarm" && lastMood !== "alarm") {
-    retrigger(box, "burst");
-    retrigger($("bloom"), "go");
-  }
-  lastMood = m;
+  $("status").dataset.state = open ? "alarm" : held ? "locked" : "clear";
+  const title = open ? "Incident detected" : held ? "Containment applied" : S.seen ? "No active alarms" : "Waiting for events";
+  const line = open ? `${what(open)} · ${who(open)}` : held ? holdText(held)
+    : S.seen ? "Canary and decoy activity will appear here as it arrives."
+    : REPLAY ? "Waiting for the recording." : "Waiting for the lab’s event stream.";
+  if ($("status-word").textContent !== title) $("status-word").textContent = title;
+  if ($("status-line").textContent !== line) $("status-line").textContent = line;
+  $("status-action").hidden = !open && !held;
+  $("metric-incidents").textContent = S.seen ? fmt(openCount) : "–";
+  $("metric-incidents").closest(".metric").dataset.alert = String(openCount > 0);
+  $("metric-sessions").textContent = S.activeSessions == null ? "–" : fmt(S.activeSessions);
+  $("metric-rate").textContent = S.rate == null ? "–" : fmt(S.rate);
+  $("phases").hidden = !REPLAY && !Object.keys(S.phases).length;
   for (const li of $("phases").children) {
     const st = S.phases[li.dataset.phase];
     li.dataset.state = st === "start" ? "now" : st === "end" ? "done" : "";
+    if (st === "start") li.setAttribute("aria-current", "step");
+    else li.removeAttribute("aria-current");
   }
 }
 
 function drawChart() {
   const rate = $("rate");
-  rate.textContent = fmt(S.rate);
+  rate.textContent = S.rate == null ? "–" : fmt(S.rate);
   rate.classList.toggle("over", S.rate > SPEED_ROWS_PER_MIN);
   const box = $("chart");
   const w = box.clientWidth, h = box.clientHeight;
@@ -458,9 +482,10 @@ function drawChart() {
   const limit = y(SPEED_ROWS_PER_MIN);
   const cut = ((limit - T) / ph).toFixed(4);
 
-  const g = svg("svg", { width: w, height: h, viewBox: `0 0 ${w} ${h}`, "aria-hidden": "true" });
+  const g = svg("svg", { width: w, height: h, viewBox: `0 0 ${w} ${h}`, role: "img",
+    "aria-label": `Read speed over three minutes. Threshold: ${SPEED_ROWS_PER_MIN} rows per minute.` });
   const ink = svg("linearGradient", { id: "speed-ink", gradientUnits: "userSpaceOnUse", x1: 0, y1: T, x2: 0, y2: T + ph });
-  for (const [off, c] of [[0, "--dye"], [cut, "--dye"], [cut, "--gold-hi"], [1, "--gold-hi"]]) {
+  for (const [off, c] of [[0, "--dye"], [cut, "--dye"], [cut, "--blue"], [1, "--blue"]]) {
     ink.append(svg("stop", { offset: off, style: `stop-color: var(${c})` }));
   }
   const defs = svg("defs");
@@ -517,7 +542,7 @@ function layoutMine() {
   const w = Math.floor(box.clientWidth);
   if (!w || (M && M.w === w)) return;
   const narrow = w < 560;
-  const h = Math.round(Math.min(360, Math.max(250, w * 0.27)));
+  const h = Math.round(Math.min(290, Math.max(208, w * 0.34)));
   const sy = Math.round(h * 0.24); // ground line
   const sx = narrow ? 22 : 40; // shaft
   const x0 = sx + 16, x1 = w - (narrow ? 10 : 20);
@@ -567,7 +592,7 @@ function layoutMine() {
     svg("path", { d: `M0,${sy}H${w}`, class: "ground" }),
     svg("path", { d: `M${sx - 13},${sy}L${sx},${top}L${sx + 13},${sy}M${sx - 7},${sy - 13}H${sx + 7}M${sx},${top}V${sy}`, class: "headframe" }),
     svg("circle", { cx: sx, cy: top, r: narrow ? 5 : 7, class: "headframe" }),
-    svg("text", { x: w - (narrow ? 10 : 20), y: narrow ? 18 : 26, "text-anchor": "end", class: "sky-label" }, `${fmt(TABLE_ROWS)} customers · ${CANARIES} canaries`),
+    svg("text", { x: w - (narrow ? 10 : 20), y: narrow ? 18 : 26, "text-anchor": "end", class: "sky-label" }, "Illustrative map"),
     crateLayer,
   );
   M = { w, sy, sx, x0, x1, narrow, pt, vein, root, tunnels, marks, crateLayer, crates: new Map(), cratePos: new Map() };
@@ -721,12 +746,12 @@ function drawDrive() {
   }
   const p = S.procs.get(S.reader);
   const idle = !p || S.now - p.lastTs > 10;
-  $("proc-name").textContent = p ? who({ session: S.reader }) : "Nobody yet";
-  $("proc-last").textContent = p ? `Last file: ${folderOf(p.last)}/${fileName(p.last)}` : "Every file open on the drive shows up here.";
+  $("proc-name").textContent = p ? who({ session: S.reader }) : "No activity yet";
+  $("proc-last").textContent = p ? `Last file: ${folderOf(p.last)}/${fileName(p.last)}` : "";
   const fpm = $("proc-fpm");
   fpm.textContent = fmt(idle ? 0 : p.fpm);
   fpm.classList.toggle("over", !idle && p.fpm > SPEED_FILES_PER_MIN);
-  $("proc-unit").textContent = p && idle ? `files a minute now, peak ${fmt(p.peak)}` : "files a minute";
+  $("proc-unit").textContent = p && idle ? `files/min · peak ${fmt(p.peak)}` : "files/min";
   const pace = $("proc-pace");
   pace.hidden = !p;
   if (p) {
@@ -781,11 +806,15 @@ function drawIncidents() {
   const list = [...S.incidents.values()].filter((i) => i.alarms.length).sort((a, b) => b.alarms[0].ts - a.alarms[0].ts);
   const focus = document.activeElement?.dataset?.key;
   if (!list.length) {
-    box.replaceChildren(el("p", "empty", "No incidents yet. When an alarm fires, its triage, report and response buttons show up here."));
+    box.replaceChildren(el("p", "empty", "No incidents recorded."));
     return;
   }
   box.replaceChildren(...list.map((inc, k) => (k ? folded(inc) : incidentCard(inc))));
-  if (focus) box.querySelector(`[data-key="${CSS.escape(focus)}"]`)?.focus();
+  if (focus) {
+    const target = box.querySelector(`[data-key="${CSS.escape(focus)}"]`);
+    const det = target?.closest("details");
+    (det && !det.open ? det.querySelector("summary") : target)?.focus({ preventScroll: true });
+  }
 }
 
 function incidentCard(inc) {
@@ -793,7 +822,7 @@ function incidentCard(inc) {
   const head = el("div", "inc-head");
   head.append(el("span", `chip ${inc.severity}`, inc.severity), el("strong", "", inc.id), el("span", "inc-state", stateOf(inc)));
   card.append(head, triage(inc), reportBlock(inc), respond(inc));
-  if (inc.checklist) card.append(checklistCard(inc));
+  appendOutcome(card, inc);
   return card;
 }
 
@@ -802,16 +831,30 @@ function folded(inc) {
   det.open = unfolded.has(inc.id);
   det.addEventListener("toggle", () => (det.open ? unfolded.add(inc.id) : unfolded.delete(inc.id)));
   const title = inc.report?.title || what(inc.last || inc.alarms[0]);
-  det.append(el("summary", "", `${inc.id} · ${title} · ${stateOf(inc)}`), triage(inc), reportBlock(inc), respond(inc));
-  if (inc.checklist) det.append(checklistCard(inc));
+  const summary = el("summary", "", `${inc.id} · ${title} · ${stateOf(inc)}`);
+  summary.dataset.key = `${inc.id}:summary`;
+  det.append(summary, triage(inc), reportBlock(inc), respond(inc));
+  appendOutcome(det, inc);
   return det;
 }
 
 function stateOf(inc) {
   if (inc.dismissed) return "False alarm";
-  if (inc.alarmAt != null && (inc.heldAt == null || inc.heldAt < inc.alarmAt)) return "Open";
+  const alarmAt = inc.alarmAt ?? inc.alarms[0]?.ts;
+  if (alarmAt != null && (inc.heldAt == null || inc.heldAt < alarmAt)) return "Open";
   if (inc.heldAt != null) return "Contained";
   return "Logged";
+}
+
+function appendOutcome(card, inc) {
+  if (inc.notice?.customers != null) {
+    const { customers, plaintext_rows: rows, locked_copies: copies } = inc.notice;
+    const noun = customers === 1 ? "customer" : "customers";
+    card.append(el("p", "estimate", `${fmt(customers)} potentially affected ${noun}`));
+    if (Number.isFinite(rows)) card.append(el("p", "estimate", `${fmt(rows)} plaintext rows exposed`));
+    if (copies?.length) card.append(el("p", "estimate", `Locked copies: ${copies.join(", ")}`));
+  }
+  if (inc.checklist) card.append(checklistCard(inc));
 }
 
 function triage(inc) {
@@ -848,7 +891,7 @@ function happened(inc) {
       // every canary read counts, not just the ones an alarm listed
       let k = 0;
       for (const sid of inc.sessions) k += S.sessions.get(sid)?.canaries || 0;
-      k ||= new Set(list.flatMap((a) => a.detail.canary_ids || [])).size || n;
+      k = Math.max(k, list.reduce((sum, a) => sum + (a.detail.canary_count ?? a.detail.canary_ids?.length ?? 0), 0)) || n;
       return `touched ${count(k, "a canary customer", "canary customers")}`;
     }
     if (r === "canary_login") return `used ${count(n, "a canary login", "canary logins")}`;
@@ -865,13 +908,22 @@ function happened(inc) {
 // the breach notice checklist from a notify_customers action. drafted only, nothing gets sent
 function checklistCard(inc) {
   const box = el("div", "triage");
-  const facts = el("dl", "facts");
+  const items = el("ul", "checklist");
+  box.append(el("p", "triage-title", "Breach notice checklist"));
   for (const it of inc.checklist) {
     const item = it && typeof it === "object" ? it : { step: it };
+    const text = String(item.step ?? item.text ?? item.task ?? item.title ?? "");
+    if (!text) continue;
+    if (text === "Lab guidance, not legal advice") {
+      box.append(el("p", "checklist-note", text));
+      continue;
+    }
     const due = item.due ?? item.by ?? item.date ?? item.deadline;
-    facts.append(el("dt", "", due != null ? dateText(due) : "To do"), el("dd", "", String(item.step ?? item.text ?? item.task ?? item.title ?? "")));
+    const line = el("li", "", text);
+    if (due != null) line.append(el("span", "checklist-note", ` · ${dateText(due)}`));
+    items.append(line);
   }
-  box.append(el("p", "triage-title", "Breach notice checklist"), el("p", "empty", "Lab guidance, not legal advice"), facts);
+  box.append(items);
   return box;
 }
 
@@ -955,6 +1007,16 @@ function reportBlock(inc) {
 // buttons live across redraws so a click mid attack still lands
 const bars = new Map();
 const sending = new Set();
+const confirmDialog = $("confirm-action");
+let confirmation = null;
+
+function canRespond(inc, action) {
+  if (inc.dismissed || inc.actions.has(action)) return false;
+  if (action === "lock") return !inc.locked && [...inc.sessions].some((sid) => /^(s|job|p)-/.test(sid));
+  if (action === "revoke") return inc.alarms.some((a) => a.detail?.export_id)
+    || [...inc.sessions].some((sid) => /^(s|job)-/.test(sid));
+  return true;
+}
 
 function respond(inc) {
   let bar = bars.get(inc.id);
@@ -965,7 +1027,7 @@ function respond(inc) {
       b.type = "button";
       b.dataset.key = `${inc.id}:${action}`;
       b.dataset.action = action;
-      b.addEventListener("click", () => act(inc.id, action));
+      b.addEventListener("click", () => requestAction(inc.id, action));
       bar.append(b);
     }
     bars.set(inc.id, bar);
@@ -976,42 +1038,107 @@ function respond(inc) {
     const did = inc.actions.has(action) || (action === "lock" && inc.locked);
     const hint = suggested.has(action) && !did;
     b.textContent = ACTIONS[action][did ? 1 : 0];
-    b.disabled = did || inc.dismissed || sending.has(b.dataset.key);
+    b.hidden = !did && !canRespond(inc, action);
+    b.disabled = did || sending.has(inc.id) || (!REPLAY && (!controlToken || $("conn").dataset.state !== "live"));
     b.classList.toggle("done", did);
     b.classList.toggle("suggested", hint);
     b.title = hint ? "The report suggests this" : "";
   }
+  if (!REPLAY && !controlToken && !inc.dismissed) bar.setAttribute("aria-description", TOKEN_HELP);
+  else bar.removeAttribute("aria-description");
   return bar;
 }
 
+function requestAction(id, action) {
+  if (!ACTIONS[action][3]) return act(id, action);
+  confirmation = { id, action };
+  $("confirm-title").textContent = `${ACTIONS[action][0]}?`;
+  $("confirm-detail").textContent = `${id} · ${ACTIONS[action][3]}${REPLAY ? " This change applies to the replay only." : ""}`;
+  $("confirm-button").textContent = ACTIONS[action][0];
+  confirmDialog.showModal();
+}
+
+function finishConfirmation(confirmed) {
+  const pendingAction = confirmation;
+  confirmation = null;
+  confirmDialog.close();
+  if (!pendingAction) return;
+  const { id, action } = pendingAction;
+  if (confirmed) act(id, action);
+  else document.querySelector(`[data-key="${CSS.escape(`${id}:${action}`)}"]`)?.focus();
+}
+
+confirmDialog.querySelector("form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  finishConfirmation(event.submitter?.value === "confirm");
+});
+confirmDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  finishConfirmation(false);
+});
+
 function post(path, body) {
   const headers = { "Content-Type": "application/json" };
-  if (TOKEN) headers["X-Dyepack-Token"] = TOKEN;
+  if (controlToken) headers["X-Dyepack-Token"] = controlToken;
   return fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
 }
 
-const refused = (r) => r.status === 401 || r.status === 403;
-const TOKEN_HELP = "The server turned this down. Open the map with its control token link.";
+const TOKEN_HELP = "Open the control link printed by dyepack serve to make live changes.";
+
+async function actionResult(response) {
+  if (response.status === 401) {
+    controlToken = "";
+    try { sessionStorage.removeItem("dyepack.control"); } catch { /* no stored token */ }
+    drawRoutes();
+    if (routesLoaded) $("routes-note").textContent = TOKEN_HELP;
+    setConn($("conn").dataset.state);
+    throw new Error(TOKEN_HELP);
+  }
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error ? cap(result.error) + "." : `Request failed (HTTP ${response.status}).`);
+  return result;
+}
 
 async function act(id, action) {
-  const e = { ts: S.now, type: "action", session: "dashboard", actor: "you", ip: "", severity: "info", detail: { incident: id, action } };
-  if (REPLAY) return handle(e);
-  const key = `${id}:${action}`;
-  sending.add(key);
+  const inc = S.incidents.get(id);
+  if (!inc || !canRespond(inc, action) || sending.has(id)) return;
+  if (!REPLAY && !controlToken) return toast(TOKEN_HELP);
+  if (!REPLAY && $("conn").dataset.state !== "live") return toast("Wait for the live stream to reconnect.");
+  const detail = { incident: id, action };
+  const e = { ts: S.now, type: "action", session: "dashboard", actor: "you", ip: "", severity: "info", detail };
+  if (REPLAY) {
+    const exportId = inc.alarms.find((a) => a.detail?.export_id)?.detail.export_id;
+    const copy = S.exports.get(exportId);
+    if (action === "notify_customers") {
+      detail.plaintext_rows = [...inc.sessions].reduce((sum, sid) => {
+        const s = S.sessions.get(sid);
+        return sum + (s ? Math.max(0, s.rows - s.canaries) : 0);
+      }, 0);
+      detail.customers = copy ? Math.max(0, copy.rows - copy.canaries) : detail.plaintext_rows;
+      detail.locked_copies = [exportId, ...inc.seals.flatMap((seal) => seal.files.map((f) => `${seal.folder}/${f}`))].filter(Boolean);
+      detail.checklist = ["Verify the affected records and preserve the incident report.", "Review notification requirements with your response team."];
+    }
+    if (action === "lock") {
+      const alarm = inc.alarms.find((a) => /^(s|job|p)-/.test(a.session));
+      handle({ ...alarm, ts: S.now, type: "lock",
+        detail: { incident: id, what: alarm.session.startsWith("p-") ? "ip" : "session" } });
+    }
+    if (action === "revoke") detail.revoked = [exportId || inc.id];
+    handle(e);
+    return toast(`${ACTIONS[action][1]} in replay.`);
+  }
+  sending.add(id);
   dirty("incidents");
   try {
-    const r = await post("/api/respond", { incident: id, action });
-    if (refused(r)) throw new Error(TOKEN_HELP);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const back = await r.json().catch(() => ({}));
-    const list = back?.checklist ?? back?.detail?.checklist;
-    if (Array.isArray(list)) e.detail.checklist = list;
-    handle(e);
+    const back = await actionResult(await post("/api/respond", detail));
+    handle({ ...e, detail: { ...detail, ...back, checklist: back.checklist ?? back.detail?.checklist } });
+    toast(`${ACTIONS[action][1]}.`);
   } catch (err) {
-    toast(err.message === TOKEN_HELP ? TOKEN_HELP : "Couldn't reach the server. Nothing changed. Try again.");
+    toast(err instanceof TypeError ? "Couldn’t confirm the response. Check the event feed before trying again." : err.message);
+  } finally {
+    sending.delete(id);
+    dirty("incidents");
   }
-  sending.delete(key);
-  dirty("incidents");
 }
 
 // the on-call phone shows the last few alerts
@@ -1019,9 +1146,6 @@ async function act(id, action) {
 let phoneTop = null;
 
 function drawPhone() {
-  const when = new Date((S.now || Date.now() / 1000) * 1000);
-  $("phone-time").textContent = when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).replace(/\s?[AP]M$/i, "");
-  $("phone-date").textContent = when.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
   const list = $("phone-notes");
   list.replaceChildren(...S.notes.slice(0, 3).map(noteCard));
   if (S.notes[0] && S.notes[0] !== phoneTop) list.firstChild.classList.add("new");
@@ -1051,6 +1175,12 @@ function noteCard(e) {
 // alert routes: which channels each severity goes to
 
 let routes = structuredClone(ROUTES);
+let routesLoaded = REPLAY;
+let savingRoutes = false;
+
+function routeHint(text) {
+  $("routes-note").textContent = !REPLAY && !controlToken ? TOKEN_HELP : text;
+}
 
 function buildRoutes() {
   const body = $("routes-body");
@@ -1063,6 +1193,7 @@ function buildRoutes() {
     for (const [ch, name] of Object.entries(CHANNELS)) {
       const td = el("td"), label = el("label", "switch"), box = el("input");
       box.type = "checkbox";
+      box.setAttribute("role", "switch");
       box.dataset.route = `${sev}:${ch}`;
       box.setAttribute("aria-label", `${cap(sev)} alarms by ${name}`);
       box.addEventListener("change", () => saveRoute(box));
@@ -1078,45 +1209,66 @@ function drawRoutes() {
   for (const box of document.querySelectorAll("[data-route]")) {
     const [sev, ch] = box.dataset.route.split(":");
     box.checked = Array.isArray(routes[sev]) && routes[sev].includes(ch);
+    box.disabled = !routesLoaded || savingRoutes || (!REPLAY && !controlToken);
   }
 }
 
 async function loadRoutes() {
   const note = $("routes-note");
   if (REPLAY) {
-    note.textContent = "In the replay, changes stay on this page.";
+    note.textContent = "These settings apply to the replay only.";
     return drawRoutes();
   }
+  const retry = $("retry-routes");
+  retry.disabled = true;
+  routesLoaded = false;
+  note.textContent = "Loading alert routes…";
+  drawRoutes();
   try {
     const r = await fetch("/api/alert-routes");
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const got = await r.json();
     if (!got || typeof got !== "object" || Array.isArray(got)) throw new Error("bad routes");
     routes = { ...structuredClone(ROUTES), ...got };
-    note.textContent = "Loaded from the server. Changes save right away.";
+    routesLoaded = true;
+    retry.hidden = true;
+    routeHint("Changes save automatically.");
   } catch {
-    note.textContent = "Couldn't load the saved routes. Showing the defaults.";
+    note.textContent = "Couldn’t load the saved routes.";
+    retry.hidden = false;
+  } finally {
+    retry.disabled = false;
+    drawRoutes();
   }
-  drawRoutes();
 }
 
 async function saveRoute(box) {
+  if (!routesLoaded || savingRoutes || (!REPLAY && !controlToken)) return drawRoutes();
   const [sev, ch] = box.dataset.route.split(":");
   const before = structuredClone(routes);
   const on = new Set(routes[sev] || []);
   if (box.checked) on.add(ch);
   else on.delete(ch);
   routes[sev] = Object.keys(CHANNELS).filter((c) => on.has(c));
-  if (REPLAY) return;
+  if (REPLAY) {
+    $("routes-note").textContent = "Updated for this replay.";
+    return;
+  }
+  const restoreFocus = document.activeElement === box;
+  savingRoutes = true;
+  $("routes-note").textContent = "Saving alert routes…";
+  drawRoutes();
   try {
-    const r = await post("/api/alert-routes", routes);
-    if (refused(r)) throw new Error(TOKEN_HELP);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    $("routes-note").textContent = "Saved.";
+    routes = await actionResult(await post("/api/alert-routes", routes));
+    routeHint("Alert routes saved.");
   } catch (err) {
     routes = before;
+    routeHint("Save failed. Try changing the route again.");
+    toast(err instanceof TypeError ? "Couldn’t save the alert routes." : err.message);
+  } finally {
+    savingRoutes = false;
     drawRoutes();
-    toast(err.message === TOKEN_HELP ? TOKEN_HELP : "Couldn't save the alert routes. Is the server running?");
+    if (restoreFocus && document.activeElement === document.body) box.focus({ preventScroll: true });
   }
 }
 
@@ -1149,7 +1301,7 @@ function tileText(key, v) {
     case "detect_seconds":
       return [dur(v, true, true), "Goal: 10 s or less", v <= 10 ? "pass" : "fail"];
     case "rows_exposed":
-      return [fmt(v), `${((100 * v) / TABLE_ROWS).toFixed(1)}% of the table before the lock`, ""];
+      return [fmt(v), "Rows read before containment", ""];
     case "guesses_cracked":
       return [fmt(v), "The thief can't tell which list is real", ""];
     case "ai_pick": {
@@ -1169,7 +1321,7 @@ function drawScore() {
   for (const tile of document.querySelectorAll(".tile")) {
     const key = tile.id.slice(2);
     const v = scoreValue(key);
-    const [value, note, verdict] = v == null ? ["Not yet", tile.dataset.note, ""] : tileText(key, v);
+    const [value, note, verdict] = v == null ? ["Pending", tile.dataset.note, ""] : tileText(key, v);
     const big = tile.querySelector(".v");
     if (v != null && big.classList.contains("wait")) retrigger(tile, "pop");
     big.textContent = value;
@@ -1184,7 +1336,7 @@ function drawPrints() {
     const li = el("li", x.hits ? "print leaked" : "print");
     const top = el("div", "print-top");
     top.append(el("strong", "", id), el("span", `chip ${x.hits ? "leaked" : "clean"}`, x.hits ? "Leaked" : "No use seen"));
-    li.append(top, el("p", "", `${fmt(x.rows || 0)} rows with ${fmt(x.canaries || 0)} canaries of its own`), el("p", "who", `Made by ${x.actor} at ${clock(x.ts)}`));
+    li.append(top, el("p", "", `${fmt(x.rows || 0)} rows · ${fmt(x.canaries || 0)} canaries`), el("p", "who", `Created by ${x.actor} at ${clock(x.ts)}`));
     if (x.hits) li.append(el("p", "trace", `${x.hits} ${x.hits === 1 ? "alarm points" : "alarms point"} to this copy`));
     return li;
   });
@@ -1200,7 +1352,13 @@ function setConn(state) {
   const c = $("conn");
   c.dataset.state = state;
   c.textContent = CONN[state];
-  $("conn-note").hidden = state !== "retry" && state !== "down";
+  const note = $("conn-note");
+  const offline = state === "retry" || state === "down";
+  const readOnly = state === "live" && !controlToken;
+  note.hidden = !offline && !readOnly;
+  note.dataset.kind = readOnly ? "readonly" : "offline";
+  if (!note.hidden) note.textContent = readOnly ? TOKEN_HELP : "Live updates are unavailable. Use Watch replay to view the recorded drill.";
+  dirty("incidents");
 }
 
 function live() {
@@ -1224,25 +1382,38 @@ async function replay() {
   $("player").hidden = false;
   let events = [];
   try {
-    events = await (await fetch("sample_events.json")).json();
+    const response = await fetch("sample_events.json");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    events = await response.json();
+    if (!Array.isArray(events) || !events.length) throw new Error("Empty recording");
   } catch {
-    $("clock").textContent = "Couldn't load the recording";
+    $("clock").textContent = "Couldn’t load the recording";
+    $("restart").disabled = false;
+    $("restart").onclick = () => location.reload();
+    $("restart").textContent = "Retry";
     return;
   }
-  if (!events.length) return;
   // "at" is when an event plays in replay seconds. quiet stretches go faster, ts stays real
   const t0 = Math.min(...events.map((e) => e.ts));
   const when = (e) => e.at ?? e.ts - t0;
   events.sort((a, b) => when(a) - when(b));
   const total = when(events.at(-1));
   const play = $("play");
+  const speeds = [...document.querySelectorAll("[data-speed]")];
+  for (const button of [play, $("restart"), ...speeds]) button.disabled = false;
   let i = 0, at = 0, speed = 1, playing = true, last = performance.now();
   const label = () => (play.textContent = i >= events.length ? "Play again" : playing ? "Pause" : "Play");
+  const updateClock = () => ($("clock").textContent = `${mmss(at)} / ${mmss(total)}`);
   const restart = () => {
     fresh();
+    unfolded.clear();
+    bars.clear();
+    if (confirmDialog.open) finishConfirmation(false);
     i = 0;
     at = 0;
+    last = performance.now();
     playing = true;
+    updateClock();
     dirty(...ALL);
   };
   play.onclick = () => {
@@ -1254,10 +1425,10 @@ async function replay() {
     restart();
     label();
   };
-  for (const b of document.querySelectorAll("[data-speed]")) {
+  for (const b of speeds) {
     b.onclick = () => {
       speed = Number(b.dataset.speed);
-      for (const o of document.querySelectorAll("[data-speed]")) o.setAttribute("aria-pressed", String(o === b));
+      for (const o of speeds) o.setAttribute("aria-pressed", String(o === b));
     };
   }
   setInterval(() => {
@@ -1269,14 +1440,30 @@ async function replay() {
       playing = false;
       label();
     }
-    $("clock").textContent = `${mmss(at)} / ${mmss(total)}`;
+    updateClock();
   }, 100);
   label();
+  updateClock();
 }
 
 fresh();
 for (const t of document.querySelectorAll(".tile")) t.dataset.note = t.querySelector(".n").textContent;
+const navLinks = [...document.querySelectorAll(".nav a")];
+function updateNavigation() {
+  const current = navLinks.find((a) => a.hash === location.hash) ?? navLinks[0];
+  for (const link of navLinks) link.removeAttribute("aria-current");
+  current.setAttribute("aria-current", "location");
+  $("view-name").textContent = current.textContent.trim();
+}
+window.addEventListener("hashchange", updateNavigation);
+updateNavigation();
+if (REPLAY) {
+  $("mode-link").href = location.pathname;
+  $("mode-link").querySelector("span").textContent = "Back to live";
+  $("mode-link").querySelector("use").setAttribute("href", "#i-wave");
+}
 buildRoutes();
+$("retry-routes").addEventListener("click", loadRoutes);
 loadRoutes();
 let resizing = 0;
 const ro = new ResizeObserver(() => {
