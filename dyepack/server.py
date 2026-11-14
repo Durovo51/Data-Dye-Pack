@@ -1,10 +1,12 @@
 """The lab front door: customer API, portal login, file events, alert routes and the live alarm stream."""
 
+import hmac
 import importlib
 import json
 import os
 import queue
 import random
+import secrets
 import sqlite3
 import sys
 import threading
@@ -27,6 +29,8 @@ KINDS = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=u
 COLS = ", ".join(schema.CUSTOMER_FIELDS)
 DEFAULT_ROUTES = {"critical": ["push", "sms"], "high": ["push"], "low": []}
 ACTIONS = ("lock", "revoke", "notify_customers", "dismiss")
+# posts that change what the server does. they need the control token from data/control_token
+GUARDED = ("/api/respond", "/api/alert-routes", "/lab/fs-event")
 LOOPBACK = ("127.0.0.1", "::1")
 SERVER = {"id": "", "actor": "server", "ip": "127.0.0.1"}
 DYEPACK = {"id": "", "actor": "dyepack", "ip": "127.0.0.1"}
@@ -64,7 +68,7 @@ class App:
         if not (schema.DB_PATH.exists() and schema.WATCH_PATH.exists()):
             raise RuntimeError("no lab yet, run dyepack lab and dyepack seed first")
         self.quiet = quiet
-        self.log, self.clients, self.pending, self.burst_folders = [], [], set(), set()
+        self.log, self.clients, self.pending, self.burst_incidents = [], [], set(), set()
         self.lock, self.export_lock = threading.Lock(), threading.Lock()
         self.pool = ThreadPoolExecutor(max_workers=4)
         self.assay, self.notify, self.burst, self.drive, self.honey = map(
@@ -79,6 +83,13 @@ class App:
         decoys = self.drive.load_decoys() if self.drive else []
         self.trip = Tripwire(self.emit, self.changed, canary.load_watch(), decoys)
         self.trip.exports = self._load_exports()
+        self.trip.checklist = getattr(self.assay, "notice_checklist", None)
+        # a fresh key every start. drills, the sentinel and the map read it and send it back
+        self.token = secrets.token_urlsafe(24)
+        path = schema.DATA_DIR / "control_token"
+        path.unlink(missing_ok=True)
+        with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+            f.write(self.token + "\n")
 
     # events
 
@@ -115,7 +126,8 @@ class App:
 
     def changed(self, inc, alarm, opened, escalated):
         # runs inside the tripwire's lock. anything slow goes to the pool
-        if alarm["detail"]["reason"] == "decoy_open":
+        # a remote agent's hit only alarms. bursting is for decoys this machine's sentinel saw
+        if alarm["detail"]["reason"] == "decoy_open" and alarm["ip"] == "127.0.0.1":
             self._schedule_burst(inc["id"], alarm["detail"]["path"])
         if opened or escalated:
             self.pool.submit(self._alert, inc["id"], alarm)
@@ -190,31 +202,34 @@ class App:
     def _schedule_burst(self, iid, path):
         folder, drive = Path(path).parent.resolve(), Path(schema.DRIVE_ROOT).expanduser().resolve()
         if folder != drive and drive not in folder.parents:
-            return  # a decoy on someone else's server, nothing here to seal
-        folder = str(folder)
+            return  # a decoy somewhere else, nothing here to lock
         with self.lock:
-            if folder in self.burst_folders:
-                return
-            self.burst_folders.add(folder)
-        self.pool.submit(self._burst, iid, folder)
+            if iid in self.burst_incidents:
+                return  # the whole drive already went for this incident
+            self.burst_incidents.add(iid)
+        self.pool.submit(self._burst, iid)
 
-    def _burst(self, iid, folder):
+    def _burst(self, iid):
         password = self.drive.vault_password() if self.drive else None
         if not (self.burst and password):
-            self._note("no burst: put DYEPACK_VAULT_PASSWORD in .env so folders can be sealed")
+            self._note("no burst: put DYEPACK_VAULT_PASSWORD in .env so the drive can be locked")
             return
         try:
-            out = self.burst.burst(folder, password)
+            out = self.burst.burst_drive(password)
         except (OSError, ValueError) as e:
-            self._note(f"burst of {folder} failed: {e}")
+            self._note(f"burst of the drive failed: {e}")
             return
-        if out["files"]:
-            # files are locked in place. the event names the .dye files that now sit there
-            self.emit("burst", DYEPACK, "critical", {"incident": iid, "folder": out["folder"],
-                                                     "files": [Path(v).name for v in out["vault"]],
-                                                     "vault": ", ".join(out["vault"])})
-        else:
-            self._note(f"nothing to lock in {folder}")
+        with self.trip.mutex:
+            inc = self.trip.incidents.get(iid)
+            if inc is not None:
+                inc["locked_files"] = inc.get("locked_files", []) + list(out["vault"])
+        # files are locked in place. one event per folder, naming the .dye files that now sit there
+        for folder in out["folders"]:
+            dyes = [v for v in out["vault"] if str(Path(v).parent) == folder]
+            self.emit("burst", DYEPACK, "critical", {"incident": iid, "folder": folder,
+                                                     "files": [Path(v).name for v in dyes], "vault": ", ".join(dyes)})
+        if not out["folders"]:
+            self._note("nothing left to lock on the drive")
 
     def _push(self, event):
         try:
@@ -246,7 +261,9 @@ class App:
                 e["canary_id"] = f"c-{first + i:03d}"
             mixed = rows + fakes
             random.SystemRandom().shuffle(mixed)  # the lock keeps row order
-            blob = self.honey.lock(mixed, password, self.profile)  # if this fails nothing is written yet
+            # the lab's rows come from the public recipe, so the lock uses it too. a jittered profile in the
+            # header would let anyone with the repo rank the real list first. if this fails nothing is written
+            blob = self.honey.lock(mixed, password, None)
             # watch first. the worst case is then watched canaries that no file holds
             watch["canaries"] += entries
             lab.write_private(schema.WATCH_PATH, watch)
@@ -363,6 +380,9 @@ class Handler(BaseHTTPRequestHandler):
             body = None
         if route is None:
             return self._send(404, {"error": "not found"})
+        if urlsplit(self.path).path in GUARDED and not hmac.compare_digest(
+                self.headers.get("X-Dyepack-Token", "").encode(), self.app.token.encode()):
+            return self._send(401, {"error": "this needs the control token from data/control_token"})
         if body is None or (route not in (self._fs, self._remote) and not isinstance(body, dict)):
             return self._send(400, {"error": "send a JSON object"})
         route(body)
@@ -511,9 +531,12 @@ class Handler(BaseHTTPRequestHandler):
         if bridge is None:
             return self._send(503, {"error": "the bridge isn't here yet"})
         events = bridge.accept(body, self.headers.get("Idempotency-Key"))
+        drive = Path(schema.DRIVE_ROOT).expanduser().resolve()
         with self.app.trip.mutex:
             known = {d["path"] for d in self.app.trip.decoys}
-            self.app.trip.decoys += [bridge.decoy_entry(e) for e in events if e["path"] not in known]
+            # this route has no token, so it can never make a file on our own drive into a decoy
+            self.app.trip.decoys += [bridge.decoy_entry(e) for e in events if e["path"] not in known
+                                     and drive not in Path(e["path"]).resolve().parents]
         self._fs(events)
 
     def _routes(self, body):
@@ -562,6 +585,8 @@ def cmd_serve(args):
         batches[key] = batches.get(key, 0) + 1
     routes = "  ".join(f"{sev}: {', '.join(ch) or 'dashboard only'}" for sev, ch in app.routes.items())
     print(f"Data Dyepack is watching Lakeview Fiber at http://127.0.0.1:{args.port}/")
+    print(f"  mine map          http://127.0.0.1:{args.port}/?token={app.token}  (the token also sits in "
+          f"{schema.DATA_DIR / 'control_token'})")
     print(f"  canaries watched  {len(watched):,} ({', '.join(f'{n:,} {k}' for k, n in batches.items())})")
     print(f"  decoy files       {len(app.trip.decoys)}")
     print(f"  reports           {'Databricks model' if app.client else 'template (no Databricks .env)'}")

@@ -179,6 +179,19 @@ class FileSessionTest(unittest.TestCase):
         self.assertNotEqual(opens[0]["detail"]["incident"], opens[1]["detail"]["incident"])
         self.assertEqual([e["session"] for e in opens], ["f-unknown", "f-unknown-2"])
 
+    def test_writing_a_decoy_is_not_opening_it(self):
+        events = []
+        trip = Tripwire(lambda kind, who, sev, detail: events.append({"type": kind, "detail": detail}) or events[-1],
+                        lambda *a: None, [])
+        decoy = "/tmp/drive/backups/all_customers_backup_unencrypted.csv"
+        trip.decoys = [{"decoy_id": "d-2", "path": decoy, "kind": "backup", "rows": 1, "batch": "drive",
+                        "planted_at": 0}]
+        for op in ("write", "rename", "open"):
+            trip.file_events([{"ts": 5.0, "pid": 9, "process": "python3", "path": decoy, "op": op}])
+        self.assertFalse([e for e in events if e["type"] == "alarm"])
+        trip.file_events([{"ts": 6.0, "pid": 9, "process": "python3", "path": decoy, "op": "read"}])
+        self.assertEqual([e["detail"]["reason"] for e in events if e["type"] == "alarm"], ["decoy_open"])
+
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -218,7 +231,7 @@ class ServerTest(unittest.TestCase):
             patch.start()
             cls.addClassCleanup(patch.stop)
         lab.build_lab(3000, seed=3)
-        canary.plant(every=30)
+        canary.plant(every=250)  # the real density. denser labs make an honest rep trip the 3 canary rule
         cls.httpd, cls.app = server.start(0, quiet=True)
         cls.app.client = cls.app.notify = None  # never reach Databricks or a real phone from a test
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
@@ -228,8 +241,10 @@ class ServerTest(unittest.TestCase):
         cls.logins = json.loads(lab.logins_path().read_text())
         cls.data = data
 
-    def call(self, method, path, body=None, sid=None, ip=None, raw=False, headers=()):
+    def call(self, method, path, body=None, sid=None, ip=None, raw=False, headers=(), token=True):
         h = {"Content-Type": "application/json", **dict(headers)}
+        if token:
+            h["X-Dyepack-Token"] = self.app.token
         if sid:
             h["X-Session"] = sid
         if ip:
@@ -266,9 +281,12 @@ class ServerTest(unittest.TestCase):
 
     def test_human_lookups_raise_no_alarm(self):
         sid = self.login("rep.casey", "10.0.0.12")
-        rows = self.call("GET", "/api/customers?q=Smith&limit=10", sid=sid)[1]["customers"]
-        for r in rows[:5]:
-            self.assertEqual(self.call("GET", f"/api/customers/{r['account_no']}", sid=sid)[0], 200)
+        # support calls come from real customers, so lookups go by their account numbers
+        with sqlite3.connect(schema.DB_PATH) as con:
+            callers = [a for (a,) in con.execute("SELECT account_no FROM customers_clean LIMIT 5")]
+        for account in callers:
+            self.assertEqual(self.call("GET", f"/api/customers/{account}", sid=sid)[0], 200)
+        self.assertEqual(self.call("GET", "/api/customers?q=Smith&limit=10", sid=sid)[0], 200)
         for name in ("Miller", "Olson", "Garcia"):
             self.assertEqual(self.call("GET", f"/api/customers?q={name}&limit=10", sid=sid)[0], 200)
         self.assertEqual(self.alarms(sid), [])
@@ -318,6 +336,9 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(self.call("GET", "/api/customers?q=a", sid=sid)[0], 423)  # the download tripped the lock
         self.assertTrue(any(e["detail"]["export_id"] == eid for e in self.alarms(sid)))
+        touch = next(e["detail"] for e in self.alarms(sid) if e["detail"]["reason"] == "canary_touch")
+        self.assertEqual(touch["canary_count"], self.app.trip.exports[eid]["canaries"])
+        self.assertLessEqual(len(touch["canary_ids"]), 50)
 
         mine = {c["account_no"]: c for c in canary.load_watch() if c["batch"] == eid}
         stolen = [r for r in honey.open_locked(blob, "Lakeview2026!") if r["account_no"] in mine]
@@ -333,6 +354,9 @@ class ServerTest(unittest.TestCase):
 
         got = self.call("POST", "/api/respond", {"incident": hit["detail"]["incident"], "action": "notify_customers"})
         self.assertEqual(got[1]["customers"], self.app.trip.exports[eid]["real"])
+        self.assertEqual(got[1]["locked_copies"], [eid])
+        self.assertEqual(got[1]["plaintext_rows"], 0)  # only logins and a locked copy left the building
+        self.assertTrue(got[1]["found_at"] and got[1]["checklist"])
         # nothing beside the locked file. a restart still knows the export
         self.assertEqual(sorted(p.name for p in schema.EXPORTS_DIR.iterdir()), [f"{eid}.dye"])
         self.assertEqual(self.app._load_exports()[eid], self.app.trip.exports[eid])
@@ -349,8 +373,11 @@ class ServerTest(unittest.TestCase):
         self.app.trip.decoys.append({"decoy_id": "d-t", "path": decoy, "kind": "export", "rows": 1,
                                      "batch": "drive", "planted_at": 0})
         self.app.drive = mock.Mock(vault_password=lambda: "pw")
-        self.app.burst = mock.Mock(burst=lambda folder, password: {
-            "folder": folder, "files": ["customers.csv"], "vault": ["/d/customers.csv.dye"], "skipped": []})
+        drive = self.data / "drive"
+        locked = [str(drive / "customers" / "customers.csv.dye"), str(drive / "billing" / "invoices.json.dye")]
+        self.app.burst = mock.Mock(burst_drive=mock.Mock(return_value={
+            "folder": str(drive), "folders": [str(drive / "customers"), str(drive / "billing")],
+            "files": ["customers/customers.csv", "billing/invoices.json"], "vault": locked, "skipped": []}))
         now = time.time()
         reads = [{"ts": now + i / 10, "pid": 4242, "process": "/usr/local/bin/node", "signing_id": None,
                   "path": str(self.data / "drive" / f"note{i}.md"), "op": "read"} for i in range(12)]
@@ -362,8 +389,11 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(found[0]["detail"]["path"], decoy)
         self.assertIn("speed", [e["detail"]["reason"] for e in found])
         self.assertFalse(self.events("read", path=str(self.data / "drive" / "mine.md")))
+        self.call("POST", "/lab/fs-event", [dict(reads[0], ts=now + 2, path=decoy.replace("all_", "more_"))])
         time.sleep(0.5)
-        self.assertEqual(self.events("burst")[-1]["detail"]["files"], ["customers.csv.dye"])
+        bursts = [e["detail"] for e in self.events("burst", incident=found[0]["detail"]["incident"])]
+        self.assertEqual([b["files"] for b in bursts], [["customers.csv.dye"], ["invoices.json.dye"]])
+        self.assertEqual(self.app.burst.burst_drive.call_count, 1)  # the whole drive, once per incident
 
     def test_linux_agent_hits_through_the_bridge(self):
         hit = {"event_id": "ev-1", "server_id": "web-01", "timestamp": time.time(), "file": "/srv/backup/all.csv",
@@ -400,6 +430,24 @@ class ServerTest(unittest.TestCase):
         reasons = {e["detail"]["reason"] for e in self.events("alarm", incident=iid)}
         self.assertEqual(report["looks_like"], "ai_agent" if "speed" in reasons else "person")
         self.assertTrue(self.events("notify", incident=iid)[0]["detail"]["summary"])
+
+    def test_control_token_guards_the_dashboard_posts(self):
+        path = self.data / "control_token"
+        self.assertEqual(path.read_text().strip(), self.app.token)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        for route, body in (("/api/respond", {"incident": "inc-1", "action": "lock"}),
+                            ("/api/alert-routes", server.DEFAULT_ROUTES), ("/lab/fs-event", [])):
+            self.assertEqual(self.call("POST", route, body, token=False)[0], 401, route)
+            self.assertEqual(self.call("POST", route, body, headers={"X-Dyepack-Token": "guess"}, token=False)[0],
+                             401, route)
+        self.assertEqual(self.call("POST", "/lab/fs-event", [])[0], 200)
+        self.assertEqual(self.call("GET", "/api/alert-routes", token=False)[0], 200)
+        self.assertEqual(self.call("POST", "/lab/drill", {"phase": "normal", "status": "start"}, token=False)[0], 200)
+        # a remote hit can't turn a file on our own drive into a decoy
+        mine = str(self.data / "drive" / "customers" / "customers.csv")
+        self.call("POST", "/api/events", {"event_id": "ev-9", "server_id": "web-02", "file": mine, "pid": 5},
+                  token=False)
+        self.assertFalse([d for d in self.app.trip.decoys if d["path"] == mine])
 
     def test_stream_and_pages(self):
         with OPENER.open(self.url + "/events", timeout=5) as stream:

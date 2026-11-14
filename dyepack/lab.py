@@ -71,7 +71,8 @@ def unique_row(rng, pick, taken):
     raise RuntimeError("ran out of unique customers, try a smaller lab")
 
 
-def make_rows(n, seed=7):
+def make_rows(n, seed=None):
+    # no seed means a fresh random lab. a fixed one would let anyone with the code rebuild the rows
     rng = random.Random(seed)
     pick = pickers(vocab.CATEGORIES)
     taken = {"account_no": set(), "portal_user": set()}
@@ -120,7 +121,7 @@ def write_private(path, data):
     os.replace(tmp, path)
 
 
-def build_lab(n, seed=7):
+def build_lab(n, seed=None):
     rows = make_rows(n, seed)
     portal = [(r["portal_user"], *h) for r, h in zip(rows, portal_hashes(n))]
     logins = {user: secrets.token_urlsafe(12) for user in STAFF}

@@ -97,7 +97,7 @@ def build_parser():
 
     lab = sub.add_parser("lab", help="build the Lakeview Fiber lab table")
     lab.add_argument("--customers", type=count, default=50_000)
-    lab.add_argument("--seed", type=int, default=7, help="random seed so runs repeat")
+    lab.add_argument("--seed", type=int, help="random seed so runs repeat (default: a fresh random lab)")
     lab.set_defaults(func=_lab)
 
     seed = sub.add_parser("seed", help="study the table and plant canary customers")
@@ -136,7 +136,7 @@ def build_parser():
     drill.set_defaults(func=_drill)
 
     drive = sub.add_parser("drive", help="build the Lakeview Fiber company drive with its decoys")
-    drive.add_argument("--seed", type=int, default=7, help="random seed so runs repeat")
+    drive.add_argument("--seed", type=int, help="random seed so runs repeat (default: a fresh random drive)")
     drive.set_defaults(func=_drive)
 
     sentinel = sub.add_parser("sentinel", help="watch file activity and report what happens on the drive")

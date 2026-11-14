@@ -44,6 +44,7 @@ class Tripwire:
         self.by_session, self.by_export = {}, {}
         self.locked_ips, self.revoked, self.revoked_exports = set(), set(), set()
         self.permits, self.exports, self.files = [], {}, {}
+        self.checklist = None  # the server hands in the breach notice checklist when it has one
         self.reads = deque()  # (ts, rows) for everyone, feeds the tick
         self.counts = {}
 
@@ -98,8 +99,8 @@ class Tripwire:
             s["seen"].append((now, n))
             _trim(s["seen"], now)
             self.reads.append((now, n))
-            if not s["locked"]:
-                s["exposed"] += n - len(hits)
+            if not s["locked"] and export_id is None:
+                s["exposed"] += n - len(hits)  # a download leaves honey locked, so it isn't plaintext
             self.emit("read", s, "info", {"rows": n, "canaries": len(hits), "path": path})
             if s["role"] == "job" or self._permitted(s, now):
                 return  # registered systems and declared digs get logged, never alarmed
@@ -114,7 +115,8 @@ class Tripwire:
             if hits:
                 ids = [c["canary_id"] for c in hits][:50]
                 inc = self._alarm(s, "canary_touch", "high" if fast or many else "low", ids,
-                                  export_id or next(filter(None, map(export_of, hits)), None), rate)
+                                  export_id or next(filter(None, map(export_of, hits)), None), rate,
+                                  count=len(hits))
             if (fast or many) and inc and not s["locked"]:
                 self._lock(s, inc, "session")
 
@@ -195,14 +197,15 @@ class Tripwire:
                 if rate > schema.SPEED_FILES_PER_MIN and not s["fast"]:
                     s["fast"] = True
                     self._alarm(s, "speed", "high", rate=rate)
-                decoy = decoy_for(path, self.decoys)
+                # only a read opens a decoy. a write is someone rebuilding the drive
+                decoy = decoy_for(path, self.decoys) if str(e.get("op") or "read") == "read" else None
                 if decoy and decoy["path"] not in s["decoys"]:
                     s["decoys"].add(decoy["path"])
                     self._alarm(s, "decoy_open", "critical", rate=rate, path=decoy["path"])
 
     # incidents
 
-    def _alarm(self, s, reason, severity, canary_ids=(), export_id=None, rate=None, path=None):
+    def _alarm(self, s, reason, severity, canary_ids=(), export_id=None, rate=None, path=None, count=None):
         iid = self.by_session.get(s["id"]) or self.by_export.get(export_id)
         inc = self.incidents.get(iid)
         opened = inc is None or inc["status"] == "dismissed"
@@ -223,7 +226,9 @@ class Tripwire:
             inc["export_id"] = export_id
             self.by_export[export_id] = inc["id"]
         self.by_session[s["id"]] = inc["id"]
+        # the id list stays short for the stream. canary_count says how many there really were
         detail = {"reason": reason, "incident": inc["id"], "canary_ids": list(canary_ids),
+                  "canary_count": len(canary_ids) if count is None else count,
                   "export_id": export_id, "rate_per_min": rate}
         if path is not None:
             detail["path"] = path
@@ -258,7 +263,17 @@ class Tripwire:
                 detail["revoked"] = sorted(users) + ([inc["export_id"]] if inc["export_id"] else [])
             elif action == "notify_customers":
                 exp = self.exports.get(inc["export_id"])
-                detail["customers"] = exp["real"] if exp else sum(s.get("exposed", 0) for s in sessions)
+                plain = sum(s.get("exposed", 0) for s in sessions)
+                detail["customers"] = exp["real"] if exp else plain
+                # what a notice needs: rows that left readable, copies that left locked and when we knew
+                detail["plaintext_rows"] = plain
+                detail["locked_copies"] = ([inc["export_id"]] if inc["export_id"] else []) + inc.get("locked_files", [])
+                detail["found_at"] = inc["opened"]
+                if self.checklist:
+                    try:
+                        detail["checklist"] = self.checklist(dict(inc), dict(detail))
+                    except Exception:
+                        pass  # a drafted notice is nice to have, the action still counts
             elif action == "dismiss":
                 inc["status"] = "dismissed"
                 for s in sessions:
