@@ -13,27 +13,33 @@ from . import honey, schema, vocab
 from .profile import build_profile
 
 ROUNDS = 1_000  # pbkdf2 rounds only slow a thief down, the scores don't depend on them
-SMALL = 2_000  # below this a table profiled from itself leaks through rare values
 CATS = [name for name, kind in vocab.PARTS if kind == "cat"]
-TESTS = ("chi_square", "g_test", "likelihood")
+TESTS = ("chi_square", "g_test", "likelihood", "recipe_fit")
 LABELS = {"chi_square": "value counts, chi square", "g_test": "value counts, G test",
-          "likelihood": "likelihood"}
+          "likelihood": "likelihood", "recipe_fit": "fit to the public recipe"}
 
 
 def score(parts, weights):
-    """(chi square, G test, log likelihood) of one list's parts against the header weights."""
-    chi = g = likely = 0.0
+    """Four checks a thief can run on one list: chi square, G test and log likelihood against
+    the header weights, plus chi square against the public recipe in vocab, since anyone
+    with the repo knows the weights the lab rows were drawn from."""
+    chi = g = likely = recipe = 0.0
     for name in CATS:
+        got = Counter(p[name] for p in parts)
         w = weights[name]
         total = sum(w.values())
-        got = Counter(p[name] for p in parts)
         for v, x in w.items():
             expect, n = len(parts) * x / total, got[v]
             chi += (n - expect) ** 2 / expect
             if n:
                 g += 2 * n * math.log(n / expect)
                 likely += n * math.log(x / total)
-    return chi, g, likely
+        public = vocab.CATEGORIES[name]
+        total = sum(public.values())
+        for v, x in public.items():
+            expect = len(parts) * x / total
+            recipe += (got[v] - expect) ** 2 / expect
+    return chi, g, likely, recipe
 
 
 def repeats(parts):
@@ -120,33 +126,30 @@ def cmd_prove(args):
             table = [dict(zip(schema.CUSTOMER_FIELDS, r)) for r in cur]
         finally:
             con.close()
-        profile = json.loads(schema.PROFILE_PATH.read_text()) if schema.PROFILE_PATH.exists() else None
-    except (sqlite3.Error, ValueError) as e:
+    except sqlite3.Error as e:
         print(f"can't read the lab: {e}", file=sys.stderr)
         return 1
     rows = secrets.SystemRandom().sample(table, min(max(1, want), len(table)))
     try:
         if compare:
-            # lock the sample as if it were the whole table, like a full export, so the exact
-            # counts come from these very rows. same rows and setup, only the header differs
+            # three headers for the same rows, locked as if they were the whole table. the
+            # first two come from these very rows, ours is the public recipe they were drawn from
             own = build_profile(rows)
-            plain, ours = prove(rows, own, fakes, naive=True), prove(rows, own, fakes)
+            runs = {"exact counts": prove(rows, own, fakes, naive=True),
+                    "jittered": prove(rows, own, fakes), "ours": prove(rows, None, fakes)}
         else:
-            result = prove(rows, profile, fakes)
+            result = prove(rows, None, fakes)  # the lab locks with the recipe's weights, so this does too
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1
     if compare:
-        print(f"locked the same {len(rows):,} customers two ways, each opened with {fakes} wrong passwords")
+        print(f"locked the same {len(rows):,} customers three ways, each opened with {fakes} wrong passwords")
+        print("header weights: exact counts of these rows, jittered counts, or ours (the public recipe)")
         print(f"where the real list ranks among {fakes + 1} lists (1 = lowest score)")
-        print(f"  {'':<26}{'exact counts':<15}ours")
+        print(f"  {'':<26}" + "".join(f"{name:<15}" for name in runs).rstrip())
         for test in TESTS:
-            print(f"  {LABELS[test]:<26}{plain['rank'][test]:<15}{ours['rank'][test]}")
+            print(f"  {LABELS[test]:<26}" + "".join(f"{r['rank'][test]:<15}" for r in runs.values()).rstrip())
         print("a giveaway sits at 1 every time. ours lands somewhere new every run.")
-        if len(rows) < SMALL:
-            print(f"note: a table under {SMALL:,} rows profiled from itself shows its rare values "
-                  "(the real list holds every one, fakes skip some), so ours can sit low. "
-                  "real exports use the whole table's profile.")
         return 0
     n = result["lists"]
     print(f"locked {result['rows']:,} customers, then opened the file with {n - 1} wrong passwords")

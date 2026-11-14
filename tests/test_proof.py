@@ -3,7 +3,6 @@
 import argparse
 import contextlib
 import io
-import json
 import sqlite3
 import statistics
 import tempfile
@@ -24,7 +23,7 @@ class ProofTest(unittest.TestCase):
 
     def test_two_thousand_rows_in_under_30_seconds(self):
         start = time.perf_counter()
-        result = proof.prove(self.table[:2000], self.profile)
+        result = proof.prove(self.table[:2000], None)
         took = time.perf_counter() - start
         self.assertLess(took, 30, f"took {took:.1f}s")
         self.assertEqual((result["rows"], result["lists"]), (2000, 100))
@@ -33,19 +32,30 @@ class ProofTest(unittest.TestCase):
             self.assertTrue(1 <= rank <= 100, rank)
         self.assertEqual(result["repeats"], {"real": 0, "fakes": 0})
 
-    def test_real_list_lands_mid_pack_on_average(self):
-        # one run can land anywhere, so average a few. with 20 lists the middle is 10.5
-        ranks = []
-        for _ in range(8):
-            ranks += proof.prove(self.table[:1000], self.profile, fakes=19)["rank"].values()
-        self.assertTrue(4 < statistics.mean(ranks) < 17, ranks)
+    def test_lab_lock_lands_mid_pack_on_every_check(self):
+        # the lab locks with the recipe's weights (profile None). one run can land anywhere,
+        # so average a dozen per check. with 20 lists the middle is 10.5
+        ranks = {test: [] for test in proof.TESTS}
+        for i in range(12):
+            result = proof.prove(self.table[i * 1000:(i + 1) * 1000], None, fakes=19)
+            for test, rank in result["rank"].items():
+                ranks[test].append(rank)
+        for test, got in ranks.items():
+            self.assertTrue(4 < statistics.mean(got) < 17, (test, got))
+
+    def test_recipe_fit_catches_a_header_built_from_the_rows(self):
+        # jittered counts beat the header checks, but anyone with the repo knows the recipe
+        # the lab draws from, and the real list fits it far better than fakes drawn around it
+        rows = self.table[:2000]
+        result = proof.prove(rows, build_profile(rows), fakes=19)
+        self.assertEqual(result["rank"]["recipe_fit"], 1)
 
     def test_naive_header_gives_the_real_list_away(self):
         # exact counts from the very rows being locked: the real list fits them best every time
         rows = self.table[:1000]
         result = proof.prove(rows, build_profile(rows), fakes=19, naive=True)
-        self.assertEqual(result["rank"]["chi_square"], 1)
-        self.assertEqual(result["rank"]["g_test"], 1)
+        for test in ("chi_square", "g_test", "recipe_fit"):
+            self.assertEqual(result["rank"][test], 1, test)
 
     def test_scoring_parts_matches_scoring_rows(self):
         # prove scores decoded parts to save time. that's only fair if rows parse back to the
@@ -77,7 +87,7 @@ class CliTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         cls.addClassCleanup(tmp.cleanup)
         rows = lab.make_rows(2500, seed=4)
-        cls.db, cls.prof = Path(tmp.name) / "lakeview.db", Path(tmp.name) / "profile.json"
+        cls.db = Path(tmp.name) / "lakeview.db"
         con = sqlite3.connect(cls.db)
         con.execute(f"CREATE TABLE customers ({', '.join(schema.CUSTOMER_FIELDS)})")
         marks = ", ".join("?" * len(schema.CUSTOMER_FIELDS))
@@ -85,16 +95,14 @@ class CliTest(unittest.TestCase):
                         [[r[f] for f in schema.CUSTOMER_FIELDS] for r in rows])
         con.commit()
         con.close()
-        cls.prof.write_text(json.dumps(build_profile(rows)))
 
     def run_prove(self, **args):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(schema, "DB_PATH", self.db):
-            with mock.patch.object(schema, "PROFILE_PATH", self.prof):
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    start = time.perf_counter()
-                    code = proof.cmd_prove(argparse.Namespace(**args))
-                    took = time.perf_counter() - start
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                start = time.perf_counter()
+                code = proof.cmd_prove(argparse.Namespace(**args))
+                took = time.perf_counter() - start
         return code, out.getvalue(), err.getvalue(), took
 
     def test_prints_a_few_clean_lines(self):
@@ -102,10 +110,11 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         lines = text.splitlines()
         self.assertEqual(lines[0], "locked 300 customers, then opened the file with 19 wrong passwords")
-        self.assertEqual(sum("real list ranked" in line and "of 20" in line for line in lines), 3)
+        ranked = [line for line in lines if "real list ranked" in line and "of 20" in line]
+        self.assertEqual(len(ranked), len(proof.TESTS))
         self.assertIn("0 in the real list, 0 across the fakes", text)
 
-    def test_compare_puts_the_naive_header_at_1_in_under_15_seconds(self):
+    def test_compare_shows_both_giveaways_in_under_15_seconds(self):
         code, text, _, took = self.run_prove(rows=2000, fakes=99, compare=True)
         self.assertEqual(code, 0)
         self.assertLess(took, 15, f"took {took:.1f}s")
@@ -115,17 +124,11 @@ class CliTest(unittest.TestCase):
                 if line.startswith(f"  {label} "):
                     ranks[test] = [int(x) for x in line[len(label) + 2:].split()]
         self.assertEqual(set(ranks), set(proof.TESTS))
-        self.assertEqual(ranks["chi_square"][0], 1)
-        self.assertEqual(ranks["g_test"][0], 1)
-        for naive, ours in ranks.values():
-            self.assertTrue(1 <= naive <= 100 and 1 <= ours <= 100)
-
-    def test_small_compare_says_why_ours_can_sit_low(self):
-        code, text, _, _ = self.run_prove(rows=300, fakes=9, compare=True)
-        self.assertEqual(code, 0)
-        self.assertIn("note: a table under 2,000 rows", text)
-        code, text, _, _ = self.run_prove(rows=300, fakes=9)
-        self.assertNotIn("note:", text)
+        for test in ("chi_square", "g_test", "recipe_fit"):
+            self.assertEqual(ranks[test][0], 1, f"exact counts, {test}")
+        self.assertEqual(ranks["recipe_fit"][1], 1, "jittered counts, recipe fit")
+        for exact, jittered, ours in ranks.values():
+            self.assertTrue(all(1 <= r <= 100 for r in (exact, jittered, ours)))
 
     def test_no_lab_fails_politely(self):
         with mock.patch.object(schema, "DB_PATH", Path("/nonexistent/lakeview.db")):

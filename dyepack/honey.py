@@ -25,7 +25,10 @@ _rng = secrets.SystemRandom()
 
 
 def lock(rows, password, profile, iterations=200_000):
-    """Customer rows -> locked bytes. Row order is kept, so pass them shuffled."""
+    """Customer rows -> locked bytes. Row order is kept, so pass them shuffled.
+    profile should describe the population the rows come from, never just these rows: a thief
+    who knows the true weights spots the list that fits them best. None uses the recipe's own
+    weights, the right header when the rows were drawn from the recipe, like the lab's."""
     for field in ("account_no", "portal_user"):
         if len({r[field] for r in rows}) != len(rows):
             raise ValueError(f"every {field} has to be unique, like in the real table")
