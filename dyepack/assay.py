@@ -1,13 +1,14 @@
-"""Incident reports and the "can AI tell?" test.
+"""Incident reports, the "can AI tell?" test and the customer notice checklist.
 
-Both ask the Databricks model when a client is passed in. With no client or on any error
-the report comes from a plain template and the pick is None.
+Reports and picks ask the Databricks model when a client is passed in. With no client or on any
+error the report comes from a plain template and the pick is None.
 """
 
 import json
 import math
 import os
 import re
+from datetime import date, datetime, timedelta
 
 from .schema import CUSTOMER_FIELDS, SPEED_FILES_PER_MIN, SPEED_ROWS_PER_MIN
 
@@ -19,19 +20,22 @@ _DATA = (".csv", ".json")  # real data files on the drive, same rule as the mine
 MACHINE_PACE = SPEED_ROWS_PER_MIN  # rows a minute, the line the tripwire and the mine map use
 FILE_PACE = SPEED_FILES_PER_MIN    # files a minute on the drive
 LOGIN_PACE = 30                    # login tries a minute, nobody types that fast
+MACHINE = "a script or AI agent"   # all that machine speed can tell us
+NOTICE_HEAD = "Lab guidance, not legal advice"
 
 REPORT_PROMPT = (
     "You write incident reports for the security team at Lakeview Fiber, an internet provider. "
     "Use only the facts you are given. Write one paragraph of 4 to 6 plain English sentences that says "
-    "what happened, how fast it was caught, whether it looks like an AI agent or a person, which canaries "
-    "or export were involved, how many real customer rows were exposed and the recommended actions. "
+    "what happened, how fast it was caught, whether the pace looks like a person or a script or AI agent, "
+    "which canaries or export were involved, how many real customer rows were exposed and the recommended "
+    "actions. Machine speed means a script or AI agent. Never claim it was an AI from speed alone. "
     "Give times under a second in ms (like 80 ms) and call the speed the peak, in rows or files a minute. "
     "No lists, no markdown and no dashes."
 )
 
 DRIVE_PROMPT = (
     " This one happened on the file drive. Name the decoy path, the process and its peak files a minute, "
-    "which customer files were locked in place as .dye files and which real files were exposed. "
+    "the customer files that were locked in place as .dye files and any real files it opened before the lock. "
     "End with the next step from the facts."
 )
 
@@ -69,7 +73,7 @@ def _later(s):
 
 
 def _home(path):
-    """~ for the home folder, so paths stay short."""
+    """~ for the home folder. Keeps paths short."""
     home, path = os.path.expanduser("~").rstrip("/"), str(path)
     return "~" + path[len(home):] if home and path.startswith(home + "/") else path
 
@@ -85,6 +89,15 @@ def _plain(name):
     # a burst locks customers.csv in place as customers.csv.dye
     name = str(name)
     return name[:-4] if name.lower().endswith(".dye") else name
+
+
+def _dyes(burst):
+    """Full paths of the .dye files a burst left. The vault field lists them all, the files are a fallback."""
+    d = _d(burst)
+    vault = d.get("vault")
+    found = [str(p).strip() for p in (vault if isinstance(vault, list) else str(vault or "").split(", "))]
+    found = [p for p in found if p.lower().endswith(".dye")]
+    return found or [os.path.join(str(d.get("folder") or ""), str(n)) for n in d.get("files") or []]
 
 
 def _on_drive(e):
@@ -165,23 +178,25 @@ def _drive_facts(f, alarms, mine, events):
                                 if _d(a).get("reason") == "decoy_open" and _d(a).get("path")))
     skip = {_spot(_d(a)["path"]).lower() for a in events
             if a.get("type") == "alarm" and _d(a).get("reason") == "decoy_open" and _d(a).get("path")}
-    bursts = [b for b in events if b.get("type") == "burst" and _ts(b) is not None]
-    sealed = {}  # folder/name -> when its fake went in
-    for b in bursts:
-        for name in _d(b).get("files") or []:
-            sealed.setdefault(_spot(os.path.join(str(_d(b).get("folder") or ""), str(name))).lower(), _ts(b))
-    exposed, faked = {}, {}
-    for e in reads:
-        path = str(_d(e).get("path") or "")
-        spot = _spot(path)
-        if spot.lower() in skip or not path.lower().endswith(_DATA):
-            continue
-        at, t = sealed.get(spot.lower()), _ts(e)
-        (faked if at is not None and t is not None and t > at else exposed)[spot] = None
+    # bursts run under the server's own session and get matched on the incident
+    bursts = [b for b in events if b.get("type") == "burst"]
     ours = [b for b in bursts if _d(b).get("incident") == f["incident"]]
-    seal = min((_ts(b) for b in ours), default=None)
+    locked = {_plain(_spot(p)).lower() for b in bursts for p in _dyes(b)}
+    # the plain file only exists until it's locked. opening it means the real data got out
+    exposed, got = {}, {}
+    for e in reads:
+        spot = _spot(_d(e).get("path") or "")
+        if spot.lower() in skip:
+            continue
+        if spot.lower().endswith(".dye") and _plain(spot).lower() in locked:
+            got[_plain(spot)] = None
+        elif spot.lower().endswith(_DATA):
+            exposed[spot] = None
+    dyes = list(dict.fromkeys(p for b in ours for p in _dyes(b)))
+    lock = min((_ts(b) for b in ours if _ts(b) is not None), default=None)
     first_alarm = min((_ts(a) for a in alarms if _ts(a) is not None), default=None)
-    peak =max([_num(_d(a).get("rate_per_min")) for a in alarms] + [_num(_d(e).get("files_per_min")) for e in reads])
+    peak = max([_num(_d(a).get("rate_per_min")) for a in alarms] + [_num(_d(e).get("files_per_min")) for e in reads],
+               default=0)
     host = first.get("ip") or ""
     return {
         "kind": _DRIVE,
@@ -193,8 +208,8 @@ def _drive_facts(f, alarms, mine, events):
         "decoys_opened": len(decoys),
         "decoy_paths": [_home(p) for p in decoys[:5]],
         "files_opened": max(len({_d(e).get("path") for e in reads if _d(e).get("path")}), len(decoys)),
-        "locked_folders": list(dict.fromkeys(_home(_d(b)["folder"]) for b in ours if _d(b).get("folder"))),
-        "locked_files": list(dict.fromkeys(_plain(n) for b in ours for n in _d(b).get("files") or [])),
+        "locked_files": [_plain(_spot(p)) for p in dyes],
+        "locked_in": list(dict.fromkeys(_home(os.path.dirname(p)) for p in dyes)),
         # from the first alarm, like the dashboard
         "seconds_to_lock": None if None in (lock, first_alarm) else round(max(0.0, lock - first_alarm), 3),
         "real_files_exposed": list(exposed)[:5],
@@ -207,7 +222,8 @@ def _actions(f):
     if _RANK.get(f["worst_severity"], 0) < _RANK["high"]:
         return ["dismiss"]
     if f.get("kind") == _DRIVE:
-        return ["lock", "revoke"] + (["notify_customers"] if f["real_files_exposed"] else [])
+        # a file watcher has no login or export to revoke
+        return ["lock"] + (["notify_customers"] if f["real_files_exposed"] else [])
     acts = []
     if not f["session_locked"] and (f["session"] or f["stolen_login_attempts"]):
         acts.append("lock")
@@ -229,9 +245,11 @@ def _join(items):
 
 def _title(f):
     if f.get("kind") == _DRIVE:
-        n, agent = f["decoys_opened"], f["looks_like"] == "ai_agent"
-        what = "a decoy file" if n == 1 else "decoy files" if n else "files at machine speed" if agent else "files"
-        return f"{'AI agent' if agent else 'A person'} opened {what} on {f['host'] or 'the company drive'}"
+        by = ("an unknown process" if f["process"] in ("", "unknown") else f["process"]) + (
+            f" on {f['host']}" if f["host"] else "")
+        if f["decoys_opened"]:
+            return f"Decoy {'file' if f['decoys_opened'] == 1 else 'files'} opened by {by}"
+        return f"Files opened {'at machine speed ' if f['looks_like'] == 'ai_agent' else ''}by {by}"
     who, exp, reasons = f["actor"] or "an unknown user", f["export_id"], f["alarm_reasons"]
     if f["stolen_login_attempts"]:
         return f"Stolen logins from export {exp}" if exp else "Logins from a cracked copy"
@@ -249,11 +267,10 @@ def _next_step(f):
         proc = "the process" if f["process"] in ("", "unknown") else f["process"]
         say = {
             "lock": f"lock the account that runs {proc}" + (f" on {f['host']}" if f["host"] else ""),
-            "revoke": "revoke any keys or tokens it holds",
             "notify_customers": f"tell the customers in {_join(f['real_files_exposed'])}",
             "dismiss": "mark it as a false alarm if this was normal work",
         }
-        steps = [say[a] for a in f["recommended_actions"]]
+        steps = [say[a] for a in f["recommended_actions"] if a in say]
         if f["locked_files"]:
             steps.append("put the locked files back with dyepack unlock once it's stopped")
         return "Next, " + _join(steps) + "."
@@ -282,7 +299,7 @@ def _template(f):
 
     if logins:
         s.append(f"Someone tried {_plural(logins, 'login')} on the customer portal with usernames that don't "
-                 f"belong to real customers, at a pace that looks like {'an AI agent' if agent else 'a person'}.")
+                 f"belong to real customers, at a pace that looks like {MACHINE if agent else 'a person'}.")
     elif "canary_contact" in reasons:
         s.append("Someone outside the company emailed or called a canary customer, "
                  "which looks like a person working from a leaked list.")
@@ -290,7 +307,7 @@ def _template(f):
         rate = f["peak_rows_per_minute"]
         peak = f" (peak {rate:,.0f} rows a minute)" if rate else ""
         s.append(f"{who} read {rows:,.0f} customer rows at {'machine speed' if agent else 'a human pace'}{peak}, "
-                 f"which looks like {'an AI agent rather than a person' if agent else 'a person rather than an AI agent'}.")
+                 f"which looks like {f'{MACHINE} rather than a person' if agent else f'a person rather than {MACHINE}'}.")
     else:
         s.append(f"{who} set off an alarm.")
 
@@ -340,7 +357,7 @@ def _drive_template(f):
     who += "" if f["pid"] is None else f" (pid {f['pid']})"
     where = f"on {host or 'the company drive'}"
     speed = f"at {'machine speed' if agent else 'a human pace'}" + (f" (peak {peak:,.0f} files a minute)" if peak else "")
-    looks = "an AI agent rather than a person" if agent else "a person rather than an AI agent"
+    looks = f"{MACHINE} rather than a person" if agent else f"a person rather than {MACHINE}"
     s = []
 
     if n:
@@ -360,9 +377,12 @@ def _drive_template(f):
 
     if locked:
         when = "" if wait is None else " " + _later(wait)
-        one = len(locked) == 1
-        s.append(f"Dyepack locked {_join(locked)} in {_join(f['locked_folders'])}{when} and "
-                 f"{f'it now sits there as {locked[0]}.dye' if one else 'they now sit there as .dye files'}.")
+        if len(locked) == 1:
+            s.append(f"Dyepack locked {locked[0]} in place{when} and it now sits there as "
+                     f"{os.path.basename(locked[0])}.dye.")
+        else:
+            shown = locked if len(locked) < 5 else locked[:3] + [f"{len(locked) - 3} more files"]
+            s.append(f"Dyepack locked {_join(shown)} in place{when} and they now sit there as .dye files.")
 
     if host:
         s.append(f"Check what else it read on {host} because only the decoys are watched there.")
@@ -456,3 +476,53 @@ def can_ai_tell(candidate_lists, client=None):
     except Exception:
         return {"pick": None, "reason": "The model didn't give a usable answer.", "source": "template"}
     return {"pick": pick, "reason": reason, "source": "databricks"}
+
+
+def _workdays(day, n):
+    """day plus n business days. Only weekends get skipped. A holiday makes it come out early, never late."""
+    while n > 0:
+        day += timedelta(days=1)
+        if day.weekday() < 5:
+            n -= 1
+    return day
+
+
+def _date(d):
+    return f"{d:%a %b} {d.day}, {d.year}"
+
+
+def notice_checklist(incident, detail):
+    """Plain lines for telling people about a breach, for the notify_customers step.
+
+    detail can carry customers, plaintext_rows, locked_copies and found_at (epoch seconds, when the
+    breach was found). The clocks are the FCC rule for carriers (47 CFR 64.2011) and Wisconsin's
+    notice law (Wis. Stat. 134.98). Lab guidance, not legal advice.
+    """
+    iid = (incident.get("id") or incident.get("incident")) if isinstance(incident, dict) else incident
+    d = detail if isinstance(detail, dict) else {}
+    found = d.get("found_at")
+    if isinstance(found, datetime):
+        day = found.date()
+    elif isinstance(found, date):
+        day = found
+    elif _num(found):
+        day = datetime.fromtimestamp(found).date()
+    else:
+        day = date.today()
+    plain, copies = d.get("plaintext_rows"), _num(d.get("locked_copies"))
+    count = _num(d.get("customers")) or _num(plain)
+    parts = [f"{_num(plain):,.0f} rows in plain text"] if plain is not None else []
+    if copies:
+        parts.append(f"{copies:,.0f} locked {'copy' if copies == 1 else 'copies'}")
+    lines = [
+        NOTICE_HEAD,
+        f"Who is affected{f' by {iid}' if iid else ''}: {_plural(int(count), 'customer')}"
+        + (f" ({', '.join(parts)})" if parts else ""),
+        f"FCC, FBI and Secret Service: report by {_date(_workdays(day, 7))} (7 business days, 47 CFR 64.2011)",
+        f"Customers in Wisconsin: by {_date(day + timedelta(days=45))} (45 days, Wis. Stat. 134.98)",
+    ]
+    if plain is not None and _num(plain) == 0:
+        lines.append("Locked copy only: likely exempt as encrypted data, check with counsel")
+    lines.append("A notice must say what happened, what data was involved, what we did, "
+                 "what they can do and who to contact")
+    return lines

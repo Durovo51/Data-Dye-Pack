@@ -7,7 +7,7 @@ import tempfile
 import traceback
 import unittest
 import urllib.error
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -359,19 +359,27 @@ def file_alarm(ts, reason, rate, path=None, who=NODE, incident="inc-4"):
     return {"ts": ts, "type": "alarm", **who, "severity": "critical" if path else "high", "detail": detail}
 
 
+EXPORT_DECOY = f"{LAB}/customers/all_customers_full_export_2026.csv"
+
+
+def lock_event(ts, folder, dyes, incident="inc-4"):
+    """A burst as the server emits it: the .dye names, plus their full paths in vault."""
+    return {"ts": ts, "type": "burst", "session": "", "actor": "dyepack", "ip": "127.0.0.1", "severity": "critical",
+            "detail": {"incident": incident, "folder": folder, "files": [os.path.basename(p) for p in dyes],
+                       "vault": ", ".join(dyes)}}
+
+
 def drive_dig(real_first=False):
-    """The agent from the mine map's replay. With real_first it reaches customers.csv before the seal."""
-    export, backup, keys = (f"{LAB}/customers/all_customers_full_export_2026.csv",
-                            f"{LAB}/backups/all_customers_backup_unencrypted.csv", f"{LAB}/config/.env.production")
+    """The agent from the mine map's replay. With real_first it reaches customers.csv before the lock."""
+    backup, keys = f"{LAB}/backups/all_customers_backup_unencrypted.csv", f"{LAB}/config/.env.production"
+    first_try = (145.9, f"{LAB}/customers/customers.csv") if real_first else (146.6, f"{LAB}/customers/customers.csv.dye")
     ev = [file_read(143.0, f"{LAB}/support/notes.md", 4),
-          file_read(145.6, export, 9), file_alarm(145.8, "decoy_open", 9, export),
-          file_read(145.9 if real_first else 146.6, f"{LAB}/customers/customers.csv", 24),
-          {"ts": 146.2, "type": "burst", "session": "", "actor": "dyepack", "ip": "127.0.0.1", "severity": "critical",
-           "detail": {"incident": "inc-4", "folder": f"{LAB}/customers", "files": ["customers.csv"], "vault": "v.vault"}},
+          file_read(145.6, EXPORT_DECOY, 9), file_alarm(145.8, "decoy_open", 9, EXPORT_DECOY),
+          file_read(*first_try, 24), lock_event(146.2, f"{LAB}/customers", [f"{LAB}/customers/customers.csv.dye"]),
           file_read(147.5, f"{LAB}/backups/nightly_2026_11_13.dye", 66), file_alarm(147.65, "speed", 66),
           file_read(147.9, backup, 92), file_alarm(148.05, "decoy_open", 92, backup),
           file_read(148.3, keys, 118), file_alarm(148.45, "decoy_open", 118, keys),
-          file_read(149.2, f"{LAB}/customers/customers.csv", 180)]
+          file_read(149.2, f"{LAB}/customers/customers.csv.dye", 180)]
     return sorted(ev, key=lambda e: e["ts"])
 
 
@@ -404,7 +412,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual((r["source"], r["title"]), ("template", "Bulk read by rep.jordan"))
         self.assertEqual((r["looks_like"], r["actions"]), ("ai_agent", ["revoke", "notify_customers"]))
         self.assertReadable(r["text"])
-        for bit in ("4,000 customer rows", "3,100 rows a minute", "looks like an AI agent rather than a person",
+        for bit in ("4,000 customer rows", "3,100 rows a minute", "looks like a script or AI agent rather than a person",
                     "4.2 seconds", "session was locked", "7 canary customers", "c-005 and more",
                     "3,984 real customer rows were exposed before the lock",
                     "Next, revoke rep.jordan's login and tell the 3,984 affected customers."):
@@ -415,7 +423,8 @@ class ReportTests(unittest.TestCase):
         self.assertEqual((r["source"], r["title"]), ("template", "Stolen logins from export exp-2"))
         self.assertEqual((r["looks_like"], r["actions"]), ("ai_agent", ["lock", "revoke", "notify_customers"]))
         self.assertReadable(r["text"])
-        for bit in ("3 logins", "pace that looks like an AI agent", "very first request", "used the logins of 2 canary customers",
+        for bit in ("3 logins", "pace that looks like a script or AI agent", "very first request",
+                    "used the logins of 2 canary customers",
                     "export exp-2", "49,800 real customer rows",
                     "Next, block where these logins came from, revoke export exp-2 and tell the 49,800 affected customers."):
             self.assertIn(bit, r["text"])
@@ -424,7 +433,7 @@ class ReportTests(unittest.TestCase):
         r = assay.write_report("inc-3", human_touch())
         self.assertEqual((r["title"], r["looks_like"], r["actions"]), ("Canary touched by rep.casey", "person", ["dismiss"]))
         self.assertReadable(r["text"])
-        for bit in ("looks like a person rather than an AI agent", "1 canary customer (c-044)",
+        for bit in ("looks like a person rather than a script or AI agent", "1 canary customer (c-044)",
                     "49 real customer rows were read so far", "false alarm"):
             self.assertIn(bit, r["text"])
 
@@ -438,48 +447,70 @@ class ReportTests(unittest.TestCase):
     def test_template_for_a_decoy_on_the_drive(self):
         with mock.patch.dict(os.environ, {"HOME": "/Users/lab"}):
             r = assay.write_report({"id": "inc-4"}, drive_dig())
-        self.assertEqual((r["title"], r["looks_like"], r["actions"]),
-                         ("AI agent opened decoy files on the company drive", "ai_agent", ["lock", "revoke"]))
+        self.assertEqual((r["title"], r["looks_like"], r["actions"]), ("Decoy files opened by node", "ai_agent", ["lock"]))
         self.assertReadable(r["text"])
         for bit in ("A process called node (pid 4242) opened the decoy file "
                     "~/LakeviewFiber/customers/all_customers_full_export_2026.csv on the company drive",
-                    "at machine speed (peak 180 files a minute)", "2.8 seconds after it started opening files",
-                    "sealed customers.csv from ~/LakeviewFiber/customers into the vault 400 ms later",
-                    "6 files in all and 3 of them were decoys",
-                    "When it opened customers/customers.csv after the seal it got a believable fake.",
-                    "Next, lock the account that runs node, revoke any keys or tokens it holds and restore "
-                    "the sealed files from the vault once it's stopped."):
+                    "machine speed (peak 180 files a minute), which looks like a script or AI agent rather than a person",
+                    "The first alarm fired 2.8 seconds after it started opening files.",
+                    "Dyepack locked customers/customers.csv in place 400 ms later and it now sits there as "
+                    "customers.csv.dye.",
+                    "It opened 6 files in all and 3 of them were decoys.",
+                    "It only got customers/customers.csv as a locked .dye file, which gives believable fakes "
+                    "for any wrong password.",
+                    "Next, lock the account that runs node and put the locked files back with dyepack unlock "
+                    "once it's stopped."):
             self.assertIn(bit, r["text"])
+        for wrong in ("an AI agent", "login", "revoke", "No customer rows were read"):
+            self.assertNotIn(wrong, r["text"])
 
-    def test_real_file_opened_before_the_seal(self):
+    def test_real_file_opened_before_the_lock(self):
         with mock.patch.dict(os.environ, {"HOME": "/Users/lab"}):
             r = assay.write_report("inc-4", drive_dig(real_first=True))
-        self.assertEqual(r["actions"], ["lock", "revoke", "notify_customers"])
+        self.assertEqual(r["actions"], ["lock", "notify_customers"])
         self.assertReadable(r["text"])
-        self.assertIn("Treat customers/customers.csv as exposed because it was the real file when it was opened.",
-                      r["text"])
-        self.assertIn("tell the customers in customers/customers.csv and restore the sealed files", r["text"])
+        for bit in ("It opened 7 files in all",
+                    "Treat customers/customers.csv as exposed because it was opened while still readable.",
+                    "Next, lock the account that runs node, tell the customers in customers/customers.csv and put "
+                    "the locked files back with dyepack unlock once it's stopped."):
+            self.assertIn(bit, r["text"])
+
+    def test_every_folder_on_the_drive_gets_locked(self):
+        dyes = [f"{LAB}/customers/customers.csv.dye", f"{LAB}/billing/invoices_2026_10.json.dye"]
+        events = [file_read(143.0, f"{LAB}/billing/invoices_2026_10.json", 6),
+                  file_read(145.6, EXPORT_DECOY, 9), file_alarm(145.8, "decoy_open", 9, EXPORT_DECOY),
+                  lock_event(146.2, LAB, dyes), file_read(146.6, dyes[0], 12)]
+        r = assay.write_report("inc-4", events)
+        self.assertEqual((r["title"], r["looks_like"], r["actions"]),
+                         ("Decoy file opened by node", "person", ["lock", "notify_customers"]))
+        self.assertReadable(r["text"])
+        for bit in ("a human pace (peak 12 files a minute), which looks like a person rather than a script or AI agent",
+                    "Dyepack locked customers/customers.csv and billing/invoices_2026_10.json in place 400 ms later "
+                    "and they now sit there as .dye files.",
+                    "Treat billing/invoices_2026_10.json as exposed because it was opened while still readable.",
+                    "tell the customers in billing/invoices_2026_10.json"):
+            self.assertIn(bit, r["text"])
 
     def test_template_for_a_linux_agent_hit(self):
         r = assay.write_report("inc-5", linux_hit())
         self.assertEqual((r["title"], r["looks_like"], r["actions"]),
-                         ("A person opened a decoy file on web-01", "person", ["lock", "revoke"]))
+                         ("Decoy file opened by python3 on web-01", "person", ["lock"]))
         self.assertReadable(r["text"])
         for bit in ("python3 (pid 77) opened the decoy file /srv/backup/all.csv on web-01",
                     "a human pace (peak 6 files a minute)", "fired the moment it opened the decoy",
-                    "Check what else it read on web-01",
-                    "Next, lock the account that runs python3 on web-01 and revoke any keys or tokens it holds."):
+                    "Check what else it read on web-01", "Next, lock the account that runs python3 on web-01."):
             self.assertIn(bit, r["text"])
-        self.assertNotIn("vault", r["text"])
+        self.assertNotIn("dye", r["text"])
 
     def test_fast_file_reads_without_a_decoy(self):
         events = [file_read(500.0 + i / 4, f"{LAB}/support/ticket_{i}.md", 6 * (i + 1)) for i in range(12)]
         r = assay.write_report("inc-6", events + [file_alarm(502.75, "speed", 72, incident="inc-6")])
         self.assertEqual((r["title"], r["looks_like"], r["actions"]),
-                         ("AI agent opened files at machine speed on the company drive", "ai_agent", ["lock", "revoke"]))
+                         ("Files opened at machine speed by node", "ai_agent", ["lock"]))
         self.assertReadable(r["text"])
         for bit in ("opened 12 files on the company drive at machine speed (peak 72 files a minute)",
-                    "None of the files were decoys.", "It hasn't opened a real customer file."):
+                    "None of the files were decoys.", "No real customer file has been exposed so far.",
+                    "Next, lock the account that runs node."):
             self.assertIn(bit, r["text"])
 
     def test_times_and_pace_match_the_dashboard(self):
@@ -496,23 +527,36 @@ class ReportTests(unittest.TestCase):
                          ["under 1 ms", "under 1 ms", "80 ms", "999 ms", "1.0 seconds", "2.3 seconds", "4.2 seconds"])
         self.assertEqual([assay._later(s) for s in (0.0001, 0.4)], ["at the same moment", "400 ms later"])
 
+    def test_time_to_catch_starts_at_the_first_read(self):
+        login = {"ts": 60.0, "type": "login", "session": "s-3", "actor": "rep.jordan", "ip": "10.0.0.7",
+                 "severity": "info", "detail": {"user": "rep.jordan", "ok": True, "where": "staff"}}
+        r = assay.write_report({"id": "inc-1"}, [login] + heist())
+        self.assertIn("The first alarm fired 4.2 seconds after the activity started", r["text"])
+        # no reads at all, like portal logins: the clock starts at the session's first event
+        outside = {"session": "p-1", "actor": "jsmith07", "ip": "203.0.113.9"}
+        tries = [{"ts": 299.0, "type": "login", **outside, "severity": "info",
+                  "detail": {"user": "jsmith07", "ok": False, "where": "portal"}},
+                 {"ts": 299.5, "type": "alarm", **outside, "severity": "critical",
+                  "detail": {"reason": "canary_login", "incident": "inc-8", "canary_ids": ["c-301"], "rate_per_min": 0}}]
+        self.assertEqual(assay._facts("inc-8", tries)["seconds_to_first_alarm"], 0.5)
+
     def test_model_gets_the_drive_facts(self):
         fake = FakeClient("A process called node opened a decoy file on the company drive at machine speed and was "
-                          "caught in 2.8 seconds. The customers folder was sealed 400 ms later. It only got fakes "
-                          "after that. Next, lock the account that runs node and restore the files from the vault.")
+                          "caught in 2.8 seconds. Dyepack locked customers.csv in place 400 ms later. It only got the "
+                          "locked copy after that. Next, lock the account that runs node and unlock the files later.")
         with mock.patch.dict(os.environ, {"HOME": "/Users/lab"}):
             r = assay.write_report("inc-4", drive_dig(), client=fake)
         self.assertEqual((r["source"], r["title"], r["looks_like"], r["actions"]),
-                         ("databricks", "AI agent opened decoy files on the company drive", "ai_agent", ["lock", "revoke"]))
+                         ("databricks", "Decoy files opened by node", "ai_agent", ["lock"]))
         system, user = fake.messages
         self.assertIn("Name the decoy path", system["content"])
         facts = json.loads(user["content"].removeprefix("Facts: "))
         self.assertEqual((facts["kind"], facts["process"], facts["pid"], facts["host"], facts["peak_files_per_minute"]),
                          ("file drive", "node", 4242, None, 180))
         self.assertEqual(facts["decoy_paths"][0], "~/LakeviewFiber/customers/all_customers_full_export_2026.csv")
-        self.assertEqual((facts["sealed_folders"], facts["sealed_files"], facts["seconds_to_seal"]),
-                         (["~/LakeviewFiber/customers"], ["customers.csv"], 0.4))
-        self.assertEqual((facts["real_files_exposed"], facts["fakes_opened"]), ([], ["customers/customers.csv"]))
+        self.assertEqual((facts["locked_files"], facts["locked_in"], facts["seconds_to_lock"]),
+                         (["customers/customers.csv"], ["~/LakeviewFiber/customers"], 0.4))
+        self.assertEqual((facts["real_files_exposed"], facts["locked_copies_opened"]), ([], ["customers/customers.csv"]))
         self.assertTrue(facts["next_step"].startswith("Next, lock the account that runs node"))
         self.assertNotIn("rows_read", facts)
 
@@ -527,7 +571,8 @@ class ReportTests(unittest.TestCase):
         self.assertTrue(r["text"].startswith("rep.jordan pulled 4,000 rows at machine speed, caught in 4.2 seconds."))
         system, user = fake.messages
         self.assertIn("4 to 6 plain English sentences", system["content"])
-        self.assertIn("whether it looks like an AI agent or a person", system["content"])
+        self.assertIn("Machine speed means a script or AI agent. Never claim it was an AI from speed alone.",
+                      system["content"])
         self.assertNotIn("file drive", system["content"])
         facts = json.loads(user["content"].removeprefix("Facts: "))
         self.assertEqual((facts["incident"], facts["canaries_touched"], facts["real_rows_exposed"]), ("inc-1", 7, 3984))
@@ -581,6 +626,40 @@ class PickTests(unittest.TestCase):
         for reply in ('{"pick": 7}', "no idea", DatabricksError("down")):
             r = assay.can_ai_tell([fake_list("a"), fake_list("b"), fake_list("c")], client=FakeClient(reply))
             self.assertEqual((r["pick"], r["source"]), (None, "template"))
+
+
+class NoticeTests(unittest.TestCase):
+    @staticmethod
+    def found(y, m, d):
+        return datetime(y, m, d, 15, 0).timestamp()  # 3 PM local keeps every timezone on the same day
+
+    def test_lines_and_dates(self):
+        lines = assay.notice_checklist({"id": "inc-2"}, {"customers": 49800, "plaintext_rows": 49800,
+                                                         "locked_copies": 1, "found_at": self.found(2026, 11, 13)})
+        self.assertEqual(lines, [
+            "Lab guidance, not legal advice",
+            "Who is affected by inc-2: 49,800 customers (49,800 rows in plain text, 1 locked copy)",
+            "FCC, FBI and Secret Service: report by Tue Nov 24, 2026 (7 business days, 47 CFR 64.2011)",
+            "Customers in Wisconsin: by Mon Dec 28, 2026 (45 days, Wis. Stat. 134.98)",
+            "A notice must say what happened, what data was involved, what we did, what they can do and who to contact",
+        ])
+
+    def test_business_days_skip_weekends(self):
+        def fcc(*ymd):
+            return next(x for x in assay.notice_checklist("inc-2", {"found_at": self.found(*ymd)}) if x.startswith("FCC"))
+        self.assertIn("by Fri Nov 20, 2026", fcc(2026, 11, 11))  # a Wednesday
+        self.assertIn("by Tue Nov 24, 2026", fcc(2026, 11, 13))  # a Friday, the weekend gets skipped
+        self.assertIn("by Tue Nov 24, 2026", fcc(2026, 11, 14))  # a Saturday counts from Monday
+        self.assertEqual(assay._workdays(date(2026, 11, 13), 1), date(2026, 11, 16))
+
+    def test_locked_copy_only(self):
+        lines = assay.notice_checklist("inc-9", {"customers": 49800, "plaintext_rows": 0, "locked_copies": 2,
+                                                 "found_at": self.found(2026, 11, 14)})
+        self.assertIn("Locked copy only: likely exempt as encrypted data, check with counsel", lines)
+        self.assertIn("Who is affected by inc-9: 49,800 customers (0 rows in plain text, 2 locked copies)", lines)
+        self.assertIn("Customers in Wisconsin: by Tue Dec 29, 2026 (45 days, Wis. Stat. 134.98)", lines)
+        self.assertNotIn("Locked copy only: likely exempt as encrypted data, check with counsel",
+                         assay.notice_checklist("inc-9", {"plaintext_rows": 5}))
 
 
 if __name__ == "__main__":
