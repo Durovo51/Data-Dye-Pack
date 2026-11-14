@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# lab data and Mac files never go in git
+data/
+.DS_Store
