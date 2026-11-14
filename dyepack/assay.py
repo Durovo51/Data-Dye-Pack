@@ -153,12 +153,17 @@ def _row_facts(f, inc, alarms, mine, events):
     peak = max((_num(_d(a).get("rate_per_min")) for a in alarms), default=0)
     tries = sorted(_ts(a) for a in alarms if _d(a).get("reason") in _LOGINS and _ts(a) is not None)
     fast_tries = len(tries) > 2 and (len(tries) - 1) * 60 >= LOGIN_PACE * (tries[-1] - tries[0])
+    held = next((_d(e).get("what") for e in mine if e.get("type") == "lock"), None)
+    session = first.get("session") or inc.get("session")
     return {
         "actor": first.get("actor") or inc.get("actor"),
         "ip": first.get("ip"),
-        "session": first.get("session") or inc.get("session"),
+        "session": session,
+        # p- sessions are portal logins and contact from outside. there's no staff login to revoke
+        "outside": str(session or "").startswith("p-"),
         "looks_like": "ai_agent" if "speed" in reasons or peak > MACHINE_PACE or fast_tries else "person",
         "session_locked": lock is not None or bool(inc.get("locked")),
+        "locked_what": "address" if held == "ip" else "session",
         "rows_read": rows,
         "real_rows_exposed": max(0, rows - sum(_num(r.get("canaries")) for r in reads)),
         "peak_rows_per_minute": peak,
@@ -227,7 +232,7 @@ def _actions(f):
     acts = []
     if not f["session_locked"] and (f["session"] or f["stolen_login_attempts"]):
         acts.append("lock")
-    if f["session"] or f["export_id"]:
+    if f["export_id"] or (f["session"] and not f["outside"]):
         acts.append("revoke")
     if f["real_rows_exposed"] or f["export_real_rows"]:
         acts.append("notify_customers")
@@ -294,7 +299,7 @@ def _template(f):
     reasons, logins, rows, secs = f["alarm_reasons"], f["stolen_login_attempts"], f["rows_read"], f["seconds_to_first_alarm"]
     agent = f["looks_like"] == "ai_agent"
     who = (actor or "An unknown user") + (f" from {f['ip']}" if f["ip"] else "")
-    lock = " and the session was locked" if f["session_locked"] else ""
+    lock = f" and the {f['locked_what']} was locked" if f["session_locked"] else ""
     s = []
 
     if logins:

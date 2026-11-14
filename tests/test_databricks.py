@@ -540,6 +540,19 @@ class ReportTests(unittest.TestCase):
                   "detail": {"reason": "canary_login", "incident": "inc-8", "canary_ids": ["c-301"], "rate_per_min": 0}}]
         self.assertEqual(assay._facts("inc-8", tries)["seconds_to_first_alarm"], 0.5)
 
+    def test_outside_sessions_never_revoke_a_login(self):
+        p = {"session": "p-2", "actor": "richard.cook40@att.net", "ip": "203.0.113.50"}
+        events = [{"ts": 600.0, "type": "alarm", **p, "severity": "critical",
+                   "detail": {"reason": "canary_contact", "incident": "inc-9", "canary_ids": ["c-001"],
+                              "export_id": None, "rate_per_min": None}},
+                  {"ts": 600.0, "type": "lock", **p, "severity": "critical", "detail": {"incident": "inc-9", "what": "ip"}}]
+        r = assay.write_report("inc-9", events)
+        self.assertEqual(r["actions"], [])
+        self.assertReadable(r["text"])
+        self.assertIn("The alarm fired on the very first request and the address was locked.", r["text"])
+        self.assertIn("Next, find which copy of the customer list held that canary", r["text"])
+        self.assertNotIn("revoke", r["text"])
+
     def test_model_gets_the_drive_facts(self):
         fake = FakeClient("A process called node opened a decoy file on the company drive at machine speed and was "
                           "caught in 2.8 seconds. Dyepack locked customers.csv in place 400 ms later. It only got the "
