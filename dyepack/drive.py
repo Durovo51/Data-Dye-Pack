@@ -85,8 +85,11 @@ def build_drive(root=None, seed=7, password=None):
     (root / "billing/invoices_2026_10.json").write_text(json.dumps(invoices, indent=2) + "\n", encoding="utf-8")
     (root / "support/notes.md").write_text(NOTES, encoding="utf-8")
     backup = rng.sample(real, len(real))  # the lock keeps row order, so shuffle first
+    # lab rows come from vocab's weights, so the lock uses those too (profile None). a header
+    # built from the table's counts would let anyone holding the repo rank cracked lists
+    # against vocab and pick out the real one
     (root / "backups/nightly_2026_11_13.dye").write_bytes(
-        honey.lock(backup, password or secrets.token_urlsafe(18), profile))
+        honey.lock(backup, password or secrets.token_urlsafe(18), None))
 
     decoys, at, now = [], 0, time.time()
     for i, (rel, (kind, n)) in enumerate(DECOYS.items(), 1):

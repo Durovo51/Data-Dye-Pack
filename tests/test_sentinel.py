@@ -57,13 +57,19 @@ def table_rows(path):
 class Stub:
     """Stands in for the dyepack server and keeps every batch posted to it."""
 
-    def __init__(self):
-        self.batches = []
-        batches = self.batches
+    def __init__(self, token=None):
+        self.batches, self.tokens = [], []
+        batches, tokens = self.batches, self.tokens
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 body = self.rfile.read(int(self.headers["Content-Length"]))
+                tokens.append(self.headers.get("X-Dyepack-Token"))
+                if token and tokens[-1] != token:
+                    self.send_response(401)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 batches.append((self.path, json.loads(body)))
                 self.send_response(200)
                 self.send_header("Content-Length", "2")
@@ -154,6 +160,25 @@ class DriveTest(unittest.TestCase):
                     burst.unlock(dye, PASSWORD)
             self.assertEqual({p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in folder.iterdir()}, before, name)
 
+    def test_burst_drive_locks_every_folder_then_unlocks(self):
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.root.rglob("*") if p.is_file()}
+        out = burst.burst_drive(PASSWORD)
+        try:
+            self.assertEqual(out["files"], ["billing/invoices_2026_10.json", "customers/customers.csv"])
+            self.assertEqual(out["folders"], [str(self.root / "billing"), str(self.root / "customers")])
+            self.assertEqual(out["vault"], [f"{self.root / f}.dye" for f in out["files"]])
+            self.assertEqual(out["skipped"], [])
+            for p, (data, _) in before.items():  # decoys, the backup and the notes stay as they are
+                if p.relative_to(self.root).as_posix() not in out["files"]:
+                    self.assertEqual(p.read_bytes(), data, p.name)
+                else:
+                    self.assertFalse(p.exists(), p.name)
+        finally:
+            for dye in out["vault"]:
+                burst.unlock(dye, PASSWORD)
+        self.assertEqual({p: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.root.rglob("*") if p.is_file()},
+                         before)
+
     @unittest.skipUnless(wired("drive"), "cli.py doesn't have drive yet")
     def test_cli_builds_the_drive(self):
         data, other = self.root.parent / "cli_data", self.root.parent / "cli_drive"
@@ -204,6 +229,18 @@ class DriveTest(unittest.TestCase):
             self.assertTrue((self.root / rel).is_file(), rel)
         keys = (self.root / "config/.env.production").read_text()
         self.assertIn("BACKUP_ENCRYPTION_KEY=", keys)
+
+    def test_locks_use_vocab_weights(self):
+        # lab rows come from vocab, so a header from the table's counts would give the real list away
+        blob = (self.root / "backups/nightly_2026_11_13.dye").read_bytes()
+        out = burst.burst(self.root / "customers", PASSWORD)
+        try:
+            for lock in (blob, Path(out["vault"][0]).read_bytes()):
+                parts = json.loads(lock.split(b"\n", 2)[1])["parts"]
+                self.assertEqual(parts, {name: dict(vocab.CATEGORIES[name]) for name in parts})
+        finally:
+            for dye in out["vault"]:
+                burst.unlock(dye, PASSWORD)
 
     def test_payment_decoy_has_no_card_or_bank_numbers(self):
         text = (self.root / "billing/all_accounts_2026_with_payment_info.json").read_text()
@@ -316,6 +353,7 @@ class SentinelTest(unittest.TestCase):
         self.feed([
             es("open", self.decoy, pid=501, exe="/bin/cat", signing="com.apple.cat", platform=True),
             es("open", real, fflag=3),  # read and write
+            es("open", real, fflag=2),  # write only, like a rebuild
             es("open", str(self.root / "customers"), folder=True),  # a folder listing
             es("rename", outside, to=real),  # moved onto the drive
             es("rename_over", self.decoy, to=outside),  # moved off the drive
@@ -330,6 +368,7 @@ class SentinelTest(unittest.TestCase):
         got = [(e["op"], e["path"], e["pid"], os.path.basename(e["process"])) for e in self.stub.events()]
         self.assertEqual(got, [
             ("read", self.decoy, 501, "cat"),
+            ("write", real, 4242, "node"),
             ("write", real, 4242, "node"),
             ("rename", real, 4242, "node"),
             ("rename", self.decoy, 4242, "node"),
@@ -369,6 +408,39 @@ class SentinelTest(unittest.TestCase):
         self.assertEqual(out.getvalue().count("cat (9)"), 3)
         self.assertIn("Still watching", err.getvalue())
 
+    def test_sends_the_control_token_once_there_is_one(self):
+        data = self.base / "data"
+        data.mkdir()
+        line = [json.dumps({"path": self.decoy, "pid": 9, "process": "/bin/cat"})]
+        with mock.patch.object(schema, "DATA_DIR", data):
+            self.feed(line)
+            (data / "control_token").write_text("t0ken\n")
+            self.feed(line)
+        self.assertEqual(self.stub.tokens, [None, "t0ken"])
+
+    def test_holds_events_until_the_control_token_works(self):
+        stub = Stub(token="t0ken")
+        self.addCleanup(stub.close)
+        data = self.base / "data"
+        data.mkdir()
+        r, w = os.pipe()
+        source, result = os.fdopen(r, "rb"), {}
+        self.addCleanup(source.close)
+        with mock.patch.object(schema, "DATA_DIR", data), contextlib.redirect_stderr(io.StringIO()) as err:
+            t = threading.Thread(target=lambda: result.update(
+                sent=sentinel.run([self.root], stub.url, backend="fake", source=source)))
+            t.start()
+            os.write(w, (json.dumps({"path": self.decoy, "pid": 9, "process": "/bin/cat"}) + "\n").encode())
+            time.sleep(0.5)  # no token yet, so the server says 401 and the sentinel holds on
+            (data / "control_token").write_text("t0ken\n")
+            time.sleep(1.5)  # it tries again about once a second
+            os.close(w)
+            t.join(10)
+        self.assertEqual(result.get("sent"), 1)
+        self.assertEqual(len(stub.events()), 1)
+        self.assertEqual((stub.tokens[0], stub.tokens[-1]), (None, "t0ken"))
+        self.assertIn("control_token", err.getvalue())
+
     @unittest.skipUnless(wired("sentinel"), "cli.py doesn't have sentinel yet")
     def test_cli_reads_stdin(self):
         lines = "".join(json.dumps({"path": self.decoy, "pid": 9, "process": "/bin/cat", "ts": float(i)}) + "\n"
@@ -396,14 +468,15 @@ class InotifyTest(unittest.TestCase):
         (root / "later").mkdir()
         time.sleep(0.5)  # a new folder gets its watch a moment after it shows up
         second = root / "later/export.csv"
-        second.write_text("x\n")
+        second.write_text("x\n")  # a write open with no read after it
         second.unlink()
-        want = {(str(first), "read"), (str(second), "read"), (str(second), "delete")}
+        want = {(str(first), "open"), (str(first), "read"), (str(second), "open"), (str(second), "delete")}
         deadline = time.time() + 5
         while time.time() < deadline and not want <= {(e["path"], e["op"]) for e in stub.events()}:
             time.sleep(0.1)
         got = stub.events()
         self.assertLessEqual(want, {(e["path"], e["op"]) for e in got})
+        self.assertNotIn((str(second), "read"), {(e["path"], e["op"]) for e in got})  # writing isn't reading
         self.assertTrue(all(e["process"] == "unknown" and e["pid"] is None for e in got))
 
 

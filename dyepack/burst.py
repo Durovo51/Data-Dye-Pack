@@ -13,7 +13,9 @@ amount due equal to the bill, say) would line up with the real rows only. Files 
 customer more than once get skipped, since the honey lock needs unique accounts and logins like
 the real table has. A file sorted by one field stays sorted for every guess, but one that's only
 partly in order (appended over time, grouped by city with no tie rule) keeps that order inside
-the lock, so the real list would be the only one that shows it.
+the lock, so the real list would be the only one that shows it. A value the recipe doesn't have
+(a rare first name, say) shows in the header with weight 1, so the real list is the one that
+holds it. Lab files never have such values.
 """
 
 import csv
@@ -58,18 +60,37 @@ def burst(folder, password):
         raise ValueError(f"no folder at {folder}")
     if not password:
         raise ValueError("no vault password, set DYEPACK_VAULT_PASSWORD in .env")
-    decoys, profile = load_decoys(), _profile()
+    decoys = load_decoys()
     out = {"folder": str(folder), "files": [], "vault": [], "skipped": []}
     for path in scan(folder, recursive=False):
         if decoy_for(path, decoys):
             continue  # decoys keep doing their job
         try:
-            dye = _lock(path, password, profile)
+            dye = _lock(path, password)
         except (OSError, ValueError) as e:
             out["skipped"].append([path.name, str(e)])
             continue
         out["files"].append(path.name)
         out["vault"].append(str(dye))
+    return out
+
+
+def burst_drive(password):
+    """burst() on every folder of the drive, for an incident that locks all of it. Same shape as
+    burst, with "folder" the drive, files as paths on the drive and "folders" where files got locked."""
+    root = Path(schema.DRIVE_ROOT).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"no drive at {root}")
+    out = {"folder": str(root), "folders": [], "files": [], "vault": [], "skipped": []}
+    for d, dirs, _ in os.walk(root):
+        dirs.sort()
+        part = burst(d, password)
+        rel = Path(d).relative_to(root)
+        if part["files"]:
+            out["folders"].append(part["folder"])
+        out["files"] += [(rel / f).as_posix() for f in part["files"]]
+        out["vault"] += part["vault"]
+        out["skipped"] += [[(rel / f).as_posix(), why] for f, why in part["skipped"]]
     return out
 
 
@@ -148,7 +169,7 @@ def cmd_unlock(args):
 cmd_restore = cmd_unlock  # the old name, so wiring made before unlock keeps working
 
 
-def _lock(path, password, profile):
+def _lock(path, password):
     dye = path.with_name(path.name + ".dye")
     if dye.exists():
         raise ValueError(f"{dye.name} is already there, so it stays as it is")
@@ -160,8 +181,11 @@ def _lock(path, password, profile):
     st = path.stat()
     lay.update(name=path.name, mode=stat.S_IMODE(st.st_mode), mtime_ns=st.st_mtime_ns, owner=[st.st_uid, st.st_gid])
     # a sorted file gets sorted again on the way out, so the lock can take the rows shuffled
-    # and row order can't tell the right password from a wrong one
-    blob = honey.lock(secrets.SystemRandom().sample(rows, len(rows)) if lay["sort"] else rows, password, profile)
+    # and row order can't tell the right password from a wrong one. the drive's rows come from
+    # vocab's weights, so the lock uses those (profile None): a header built from counts would
+    # let anyone holding the repo rank cracked lists against vocab and pick out the real one
+    rows_in = secrets.SystemRandom().sample(rows, len(rows)) if lay["sort"] else rows
+    blob = honey.lock(rows_in, password, None)
     _write(dye, _with_layout(blob, lay), lay["mode"], owner=lay["owner"])
     try:
         # the original only goes once the .dye on disk opens back to the very same bytes
@@ -396,13 +420,6 @@ def _write(path, data, mode, times=None, owner=None):
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
-
-
-def _profile():
-    try:
-        return json.loads(Path(schema.PROFILE_PATH).read_text())
-    except (OSError, ValueError):
-        return None
 
 
 def _sha(data):

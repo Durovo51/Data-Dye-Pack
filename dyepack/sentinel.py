@@ -37,13 +37,15 @@ NOISE_IDS = (
 # inotify bits
 IN_ACCESS, IN_OPEN, IN_MOVED_FROM, IN_MOVED_TO = 0x1, 0x20, 0x40, 0x80
 IN_CREATE, IN_DELETE, IN_IGNORED, IN_ISDIR = 0x100, 0x200, 0x8000, 0x40000000
-OPS = ((IN_OPEN, "read"), (IN_ACCESS, "read"), (IN_MOVED_FROM, "rename"), (IN_DELETE, "delete"))
+# an inotify open can't say read or write, so it's "open". the read call after it is "read"
+OPS = ((IN_OPEN, "open"), (IN_ACCESS, "read"), (IN_MOVED_FROM, "rename"), (IN_DELETE, "delete"))
 
 
 def run(roots, server_url, backend="auto", source=None, echo=False):
     """Forwards file events under roots to the server until the source ends or Ctrl-C.
-    Each event is {"ts", "pid", "process", "signing_id", "path", "op"} with op one of
-    read, write, rename or delete. Returns how many events the server took."""
+    Each event is {"ts", "pid", "process", "signing_id", "path", "op"} with op one of read, write,
+    rename, delete or open (Linux, where an open doesn't say which). Returns how many events
+    the server took."""
     roots = _roots(roots)
     post = _Poster(server_url)
     backend = pick_backend(backend)
@@ -299,6 +301,14 @@ def _under(path, roots):
     return any(p == r or p.startswith(r + "/") for r in roots)
 
 
+def _token():
+    # the server's control token, read fresh each time so a server restart is fine. never printed
+    try:
+        return (Path(schema.DATA_DIR) / "control_token").read_text().strip() or None
+    except OSError:
+        return None
+
+
 def _show(ev):
     who = os.path.basename(ev["process"])
     if ev["pid"] is not None:
@@ -355,12 +365,21 @@ class _Poster:
                 return
 
     def _send(self, chunk):
-        req = urllib.request.Request(self.url, data=json.dumps(chunk).encode(), method="POST",
-                                     headers={"Content-Type": "application/json"})
+        headers = {"Content-Type": "application/json"}
+        token = _token()
+        if token:
+            headers["X-Dyepack-Token"] = token
+        req = urllib.request.Request(self.url, data=json.dumps(chunk).encode(), method="POST", headers=headers)
         try:
             with self.opener.open(req, timeout=5) as r:
                 r.read()
         except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                # no token yet, or the server made a new one. hold on and try again
+                if not self.down:
+                    print(f"server said {e.code}, holding events until data/control_token works", file=sys.stderr)
+                    self.down = True
+                return False
             # the server is up but turned these down, so don't hold up the rest
             print(f"server said {e.code} to {len(chunk)} events, skipped them", file=sys.stderr)
             self.dropped += len(chunk)
