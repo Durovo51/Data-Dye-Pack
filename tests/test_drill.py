@@ -105,6 +105,19 @@ class Stub:
                         con.row_factory = sqlite3.Row
                         rows = [dict(r) for r in con.execute(f"SELECT {COLS} FROM customers")]
                     eid = f"exp-{len(stub.exports) + 1}"
+                    # like the server: the export gets its own canaries, added to the watch list
+                    watch = json.loads(schema.WATCH_PATH.read_text())
+                    known = rows + watch["canaries"]
+                    fakes, entries = canary.make_canaries(
+                        load_profile(), 10, [r["account_no"] for r in known], [r["portal_user"] for r in known],
+                        eid, taken_contacts=[r[f] for r in known for f in ("email", "phone")])
+                    for i, e in enumerate(entries, len(watch["canaries"]) + 1):
+                        e["canary_id"] = f"c-{i:03d}"
+                    watch["canaries"] += entries
+                    lab.write_private(schema.WATCH_PATH, watch)
+                    stub.trip.watch(entries)
+                    rows += fakes
+                    random.shuffle(rows)
                     stub.exports[eid] = (honey.lock(rows, body["password"], load_profile(), iterations=2000),
                                          [r["account_no"] for r in rows])
                     return self.send(200, {"export_id": eid})
@@ -251,8 +264,19 @@ class DrillTest(unittest.TestCase):
         for r in ("speed", "canary_touch", "unknown_account_login", "canary_login", "canary_contact"):
             self.assertIn(r, reasons)
         self.assertIn("5 of 5 tries fired", out)
+        # the canary tries come from the stolen export and the alarms name it
+        self.assertEqual(out.count("taken from exp-1's real list (say the thief guessed the password)"), 2)
+        self.assertEqual(out.count("taken from a cracked fake list"), 3)
+        for reason in ("canary_login", "canary_contact"):
+            self.assertEqual(self.stub.alarms(reason=reason)[0]["detail"]["export_id"], "exp-1")
+        self.assertIn("names exp-1", out)
         phases = [(d["phase"], d["status"]) for d in self.stub.drills]
         self.assertEqual(phases, [(p, s) for p in ("heist-1", "heist-2", "heist-3") for s in ("start", "end")])
+
+    def test_step_3_alone_has_nothing_stolen(self):
+        code, out = self.drill(mode="heist", step=3)
+        self.assertEqual(code, 1)
+        self.assertIn("step 3 needs what the thief stole", out)
 
     def test_ai_pick_asks_the_client(self):
         client = mock.Mock()
@@ -272,21 +296,26 @@ class DrillTest(unittest.TestCase):
         (root / "customers" / "customers.csv").write_text("account_no\nLV00000002\n")
         self.stub.trip.decoys = [{"decoy_id": "d-1", "path": str(decoy.resolve()), "kind": "export",
                                   "rows": 1, "batch": "drive", "planted_at": 0}]
-        code, out = self.drill(mode="agent", simulate_sentinel=True)
+        with mock.patch.object(drive, "load_decoys", return_value=self.stub.trip.decoys):
+            code, out = self.drill(mode="agent", simulate_sentinel=True)
         self.assertEqual(code, 0, out)
         alarm = self.stub.alarms(reason="decoy_open")[0]
         self.assertEqual(drive.decoy_for(alarm["detail"]["path"], self.stub.trip.decoys)["decoy_id"], "d-1")
         self.assertIsNotNone(self.final_score()["detect_seconds"])
         self.assertIn("burst locked", out)
+        self.assertIn("1 of 1 real data files were read before the lock", out)
 
     def test_simulated_sentinel_sends_the_control_token(self):
         root = schema.DRIVE_ROOT
         (root / "billing").mkdir(parents=True, exist_ok=True)
         (root / "billing" / "invoices.json").write_text("[]")
+        self.stub.trip.decoys = [{"decoy_id": "d-1", "path": str((root / "billing" / "invoices.json").resolve()),
+                                  "kind": "payments", "rows": 0, "batch": "drive", "planted_at": 0}]
         token = schema.DATA_DIR / "control_token"
         token.write_text("lab-token-123\n")
         self.addCleanup(token.unlink)
         code, out = self.drill(mode="agent", simulate_sentinel=True)
+        self.assertEqual(code, 0, out)
         self.assertTrue(self.stub.tokens)
         self.assertEqual(set(self.stub.tokens), {"lab-token-123"})
         self.assertNotIn("lab-token-123", out)

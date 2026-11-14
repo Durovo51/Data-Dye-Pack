@@ -285,7 +285,7 @@ def heist_1(lab_, watch, rng, haul):
     return {"detect_seconds": _round(detect), "rows_exposed": exposed}
 
 
-def heist_2(lab_, watch, rng, fakes, client=None):
+def heist_2(lab_, watch, rng, fakes, client=None, export=None):
     """A second phished login exports the table, downloads it and cracks it."""
     user, ip = PHISHED[1], outside_ip(rng)
     sid = lab_.login(user, logins()[user], ip)
@@ -309,7 +309,10 @@ def heist_2(lab_, watch, rng, fakes, client=None):
     fakes.extend(lists)
     shown = [rows[:5] for rows in rng.sample(lists, 4)]
     real = rng.randrange(len(shown) + 1)
-    shown.insert(real, honey.open_locked(blob, password, limit=5))
+    full = honey.open_locked(blob, password)
+    if export is not None:
+        export.update(id=eid, real=full)  # for step 3: say the thief guessed the password
+    shown.insert(real, full[:5])
     pick = _ask(shown, client)
     if pick is None:
         print("  can the AI tell? no model to ask (fill .env for Databricks)")
@@ -318,27 +321,40 @@ def heist_2(lab_, watch, rng, fakes, client=None):
     return {"guesses_cracked": cracked, "ai_pick": {"pick": pick, "real": real, "lists": len(shown)}}
 
 
-def heist_3(lab_, watch, rng, fakes, haul):
+def stolen_canaries(export, haul):
+    """(canaries, where they came from), only from what the thief actually took. The export's own
+    canaries come first, so the alarm names that copy."""
+    by_account = {c["account_no"]: c for c in watch_list()}
+    if export.get("real"):
+        inside = [by_account[r["account_no"]] for r in export["real"] if r["account_no"] in by_account]
+        own = [c for c in inside if c["batch"] == export["id"]]
+        if own or inside:
+            return own or inside, f"{export['id']}'s real list (say the thief guessed the password)"
+    rows = [by_account[r["account_no"]] for r in haul if r.get("account_no") in by_account]
+    if rows:
+        return rows, "step 1's stolen rows"
+    return [], ""
+
+
+def heist_3(lab_, watch, rng, fakes, haul, export=None):
     """The thief tries stolen logins on the portal and writes to a customer."""
     ip, ip2 = outside_ip(rng), outside_ip(rng)
-    watched = watch_list()
-    by_account = {c["account_no"]: c for c in watched}
-    # canaries from the rows step 1 got out, or any table canary when step 1 didn't run
-    stolen = [by_account[r["account_no"]] for r in haul if r.get("account_no") in by_account]
-    stolen = stolen or [c for c in watched if c["batch"] == "table"]
+    stolen, where = stolen_canaries(export or {}, haul)
     if not stolen:
-        raise RuntimeError("no canaries on the watch list, run dyepack seed first")
+        raise RuntimeError("step 3 needs what the thief stole: run it together with step 2 (or step 1)")
     names = [r["portal_user"] for rows in fakes for r in rows]
     taken = known_users(names) if names else set()
     unknown = [u for u in dict.fromkeys(names) if u not in taken][:3]
+    fake_from = "a cracked fake list"
     if not unknown:
-        unknown = [f"{w}{rng.randint(1000, 9999)}" for w in ("jsmith", "mgarcia", "kwilson")]
+        unknown, fake_from = [f"{w}{rng.randint(1000, 9999)}" for w in ("jsmith", "mgarcia", "kwilson")], "a guess"
     lab_.phase("heist-3", "start")
-    tries = [("unknown_account_login", "portal login", u) for u in unknown]
-    tries.append(("canary_login", "portal login", stolen[0]["portal_user"]))
-    tries.append(("canary_contact", "email", stolen[0]["email"]))
+    contact = stolen[1] if len(stolen) > 1 else stolen[0]
+    tries = [("unknown_account_login", "portal login", u, fake_from) for u in unknown]
+    tries.append(("canary_login", "portal login", stolen[0]["portal_user"], where))
+    tries.append(("canary_contact", "email", contact["email"], where))
     fired = 0
-    for i, (reason, how, who) in enumerate(tries):
+    for i, (reason, how, who, came_from) in enumerate(tries):
         t = time.time()
         if reason == "canary_contact":
             lab_.call("POST", "/lab/contact", {"to": who, "channel": "email"}, ip=ip2)
@@ -348,7 +364,9 @@ def heist_3(lab_, watch, rng, fakes, haul):
             src = ip
         hit = watch.wait(3, t, reason=reason, ip=src) if watch.live else None
         fired += hit is not None
-        print(f"heist step 3: {how} as {who} from {src}: {'fired ' + reason if hit else 'no alarm'}")
+        named = (hit or {}).get("detail", {}).get("export_id")
+        result = f"fired {reason}" + (f", names {named}" if named else "") if hit else "no alarm"
+        print(f"heist step 3: {how} as {who} from {src}, taken from {came_from}: {result}")
     print(f"heist step 3: {fired} of {len(tries)} tries fired")
     return {"step3_fired": fired, "step3_tries": len(tries)}
 
@@ -391,6 +409,9 @@ def agent(lab_, watch, args):
             print(f"  {path}")
     else:
         print("agent: no decoy alarm (is dyepack sentinel running? try --simulate-sentinel)", file=sys.stderr)
+    if opened is not None:
+        print(f"agent: {_before_lock(opened, burst)} real data files were read before the lock"
+              + (" (the simulated sentinel reports only after the reader is done)" if simulate else ""))
     if burst:
         for e in watch.find(t0, kind="burst"):
             d = e["detail"]
@@ -419,6 +440,16 @@ def _replay(opened, pid, root, lab_):
         if code != 200:
             print(f"agent: server said {code} to the file events", file=sys.stderr)
     print(f"agent: fed {sent} file events through the sentinel's parser")
+
+
+def _before_lock(opened, burst):
+    """"x of y": non decoy customer tables (csv, json) the reader opened before the first burst."""
+    from .burst import TABLES
+    from .drive import decoy_for, load_decoys
+    decoys = load_decoys()
+    real = [o for o in opened if Path(o["path"]).suffix.lower() in TABLES and not decoy_for(o["path"], decoys)]
+    lock = burst["ts"] if burst else float("inf")
+    return f"{sum(o['ts'] < lock for o in real)} of {len(real)}"
 
 
 def _ask(lists, client):
@@ -476,17 +507,17 @@ def cmd_drill(args):
             checks.append(got["normal_alarms"] == 0)
         elif args.mode == "heist":
             steps = [args.step] if getattr(args, "step", None) else [1, 2, 3]
-            haul, fakes = [], []
+            haul, fakes, export = [], [], {}
             pause = getattr(args, "pause", 0) or 0  # seconds between steps, so people watching can follow
             if 1 in steps:
                 got = run("heist-1", heist_1, rng, haul)
                 checks.append(got["detect_seconds"] is not None and got["detect_seconds"] <= 10)
             if 2 in steps:
                 time.sleep(pause if 1 in steps else 0)
-                run("heist-2", heist_2, rng, fakes, _client())
+                run("heist-2", heist_2, rng, fakes, _client(), export)
             if 3 in steps:
                 time.sleep(pause if steps != [3] else 0)
-                got = run("heist-3", heist_3, rng, fakes, haul)
+                got = run("heist-3", heist_3, rng, fakes, haul, export)
                 checks.append(got["step3_fired"] == got["step3_tries"])
         else:
             got = run("agent", agent, args)
