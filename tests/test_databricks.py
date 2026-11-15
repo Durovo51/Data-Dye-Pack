@@ -413,7 +413,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual((r["looks_like"], r["actions"]), ("ai_agent", ["revoke", "notify_customers"]))
         self.assertReadable(r["text"])
         for bit in ("4,000 customer rows", "3,100 rows a minute", "looks like a script or AI agent rather than a person",
-                    "4.2 seconds", "session was locked", "7 canary customers", "c-005 and more",
+                    "4.2 seconds", "the tripwire locked the session automatically", "7 canary customers", "c-005 and more",
                     "3,984 real customer rows were exposed before the lock",
                     "Next, revoke rep.jordan's login and tell the 3,984 affected customers."):
             self.assertIn(bit, r["text"])
@@ -453,7 +453,7 @@ class ReportTests(unittest.TestCase):
                     "~/LakeviewFiber/customers/all_customers_full_export_2026.csv on the company drive",
                     "machine speed (peak 180 files a minute), which looks like a script or AI agent rather than a person",
                     "The first alarm fired 2.8 seconds after it started opening files.",
-                    "Dyepack locked customers/customers.csv in place 400 ms later and it now sits there as "
+                    "Dyepack automatically locked customers/customers.csv in place 400 ms later and it now sits there as "
                     "customers.csv.dye.",
                     "It opened 6 files in all and 3 of them were decoys.",
                     "It only got customers/customers.csv as a locked .dye file, which gives believable fakes "
@@ -485,7 +485,8 @@ class ReportTests(unittest.TestCase):
                          ("Decoy file opened by node", "person", ["lock", "notify_customers"]))
         self.assertReadable(r["text"])
         for bit in ("a human pace (peak 12 files a minute), which looks like a person rather than a script or AI agent",
-                    "Dyepack locked customers/customers.csv and billing/invoices_2026_10.json in place 400 ms later "
+                    "Dyepack automatically locked customers/customers.csv and billing/invoices_2026_10.json in place "
+                    "400 ms later "
                     "and they now sit there as .dye files.",
                     "Treat billing/invoices_2026_10.json as exposed because it was opened while still readable.",
                     "tell the customers in billing/invoices_2026_10.json"):
@@ -549,7 +550,8 @@ class ReportTests(unittest.TestCase):
         r = assay.write_report("inc-9", events)
         self.assertEqual(r["actions"], [])
         self.assertReadable(r["text"])
-        self.assertIn("The alarm fired on the very first request and the address was locked.", r["text"])
+        self.assertIn("The alarm fired on the very first request and the tripwire locked the address automatically.",
+                      r["text"])
         self.assertIn("Next, find which copy of the customer list held that canary", r["text"])
         self.assertNotIn("revoke", r["text"])
 
@@ -567,11 +569,35 @@ class ReportTests(unittest.TestCase):
         self.assertEqual((facts["kind"], facts["process"], facts["pid"], facts["host"], facts["peak_files_per_minute"]),
                          ("file drive", "node", 4242, None, 180))
         self.assertEqual(facts["decoy_paths"][0], "~/LakeviewFiber/customers/all_customers_full_export_2026.csv")
-        self.assertEqual((facts["locked_files"], facts["locked_in"], facts["seconds_to_lock"]),
-                         (["customers/customers.csv"], ["~/LakeviewFiber/customers"], 0.4))
+        self.assertEqual((facts["locked_files"], facts["locked_in"], facts["files_locked"]),
+                         (["customers/customers.csv"], ["~/LakeviewFiber/customers"],
+                          "automatically, 400 ms after the first alarm"))
         self.assertEqual((facts["real_files_exposed"], facts["locked_copies_opened"]), ([], ["customers/customers.csv"]))
         self.assertTrue(facts["next_step"].startswith("Next, lock the account that runs node"))
         self.assertNotIn("rows_read", facts)
+
+    def test_model_reads_plain_facts(self):
+        fake = FakeClient("A process called python3 opened a decoy file on web-01 and was caught in 40 ms. "
+                          "It read files at a human pace. Only decoys are watched there. "
+                          "The next step is to lock the account that runs python3 on web-01.")
+        hit = linux_hit()
+        hit[0]["ts"] = 399.96  # the file open came 40 ms before the alarm
+        r = assay.write_report("inc-5", hit, client=fake)
+        # the dashboard already labels it Next step and the lead in goes
+        self.assertTrue(r["text"].endswith("watched there. Next, lock the account that runs python3 on web-01."), r["text"])
+        system, user = fake.messages
+        for rule in ("The tripwire makes every lock automatically. Never say a person or the team responded.",
+                     "Call them canary customers, never files.", "Leave out any speed the facts don't give.",
+                     "starting with Next."):
+            self.assertIn(rule, system["content"])
+        facts = json.loads(user["content"].removeprefix("Facts: "))
+        self.assertEqual((facts["caught_in"], facts["pace_looks_like"], facts["what_set_it_off"]),
+                         ("40 ms after its first read or file open", "a person", ["a decoy file was opened"]))
+        self.assertNotIn("ai_agent", user["content"])
+        logins = assay._for_model(assay._facts("inc-2", stolen_logins()))
+        self.assertNotIn("peak_rows_per_minute", logins)  # no rows read means no row speed
+        self.assertEqual((logins["pace_looks_like"], logins["canary_customers_touched"]), ("a script or AI agent", 2))
+        self.assertNotIn("ai_agent", json.dumps(logins))
 
     def test_model_writes_the_report(self):
         fake = FakeClient("rep.jordan pulled 4,000 rows at machine speed \u2014 caught in 4.2 seconds. "
@@ -588,8 +614,12 @@ class ReportTests(unittest.TestCase):
                       system["content"])
         self.assertNotIn("file drive", system["content"])
         facts = json.loads(user["content"].removeprefix("Facts: "))
-        self.assertEqual((facts["incident"], facts["canaries_touched"], facts["real_rows_exposed"]), ("inc-1", 7, 3984))
-        self.assertEqual((facts["looks_like"], facts["recommended_actions"]), ("ai_agent", ["revoke", "notify_customers"]))
+        self.assertEqual((facts["incident"], facts["canary_customers_touched"], facts["real_rows_exposed"]),
+                         ("inc-1", 7, 3984))
+        self.assertEqual((facts["pace_looks_like"], facts["lock"], facts["caught_in"]),
+                         ("a script or AI agent", "the tripwire locked the session automatically",
+                          "4.2 seconds after its first read or file open"))
+        self.assertEqual(facts["next_step"], "Next, revoke rep.jordan's login and tell the 3,984 affected customers.")
 
     def test_falls_back_on_errors_or_empty_text(self):
         for iid, events in (("inc-1", heist()), ("inc-4", drive_dig())):

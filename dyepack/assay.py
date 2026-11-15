@@ -29,15 +29,30 @@ REPORT_PROMPT = (
     "what happened, how fast it was caught, whether the pace looks like a person or a script or AI agent, "
     "which canaries or export were involved, how many real customer rows were exposed and the recommended "
     "actions. Machine speed means a script or AI agent. Never claim it was an AI from speed alone. "
-    "Give times under a second in ms (like 80 ms) and call the speed the peak, in rows or files a minute. "
+    "The tripwire makes every lock automatically. Never say a person or the team responded. "
+    "Canaries are fake customers planted in the data. Call them canary customers, never files. "
+    "Copy times exactly as the facts write them (like 40 ms) and call the speed the peak, in rows or files a minute. "
+    "Leave out any speed the facts don't give. End with the next step from the facts, starting with Next. "
     "No lists, no markdown and no dashes."
 )
 
 DRIVE_PROMPT = (
     " This one happened on the file drive. Name the decoy path, the process and its peak files a minute, "
-    "the customer files that were locked in place as .dye files and any real files it opened before the lock. "
-    "End with the next step from the facts."
+    "the customer files that were locked in place as .dye files and any real files it opened before the lock."
 )
+
+# alarm reasons in plain words. no raw code should end up in a sentence
+_SAID = {
+    "speed": "reading at machine speed",
+    "canary_touch": "a canary customer was read",
+    "canary_login": "someone logged in as a canary customer",
+    "unknown_account_login": "a login for an account that doesn't exist",
+    "canary_contact": "a canary customer was emailed or called",
+    "decoy_open": "a decoy file was opened",
+}
+# "The next step is to lock..." repeats the dashboard's Next step label. it becomes "Next, lock..."
+_LEAD = re.compile(r"(^|(?<=[.!?])\s)(?:the |our )?(?:recommended |best )?next steps?"
+                   r"(?:\s+(?:is|are|would be|should be|will be)(?:\s+to)?)?\s*[:,]?\s+", re.I)
 
 PICK_PROMPT = (
     "Several customer lists were opened from one stolen export, each with a different password guess. "
@@ -135,8 +150,7 @@ def _facts(incident, events):
     drive = "decoy_open" in reasons or any(map(_on_drive, mine))
     f.update(_drive_facts(f, alarms, mine, events) if drive else _row_facts(f, inc, alarms, mine, events))
     f["recommended_actions"] = _actions(f)
-    if drive:
-        f["next_step"] = _next_step(f)
+    f["next_step"] = _next_step(f)
     return f
 
 
@@ -299,7 +313,7 @@ def _template(f):
     reasons, logins, rows, secs = f["alarm_reasons"], f["stolen_login_attempts"], f["rows_read"], f["seconds_to_first_alarm"]
     agent = f["looks_like"] == "ai_agent"
     who = (actor or "An unknown user") + (f" from {f['ip']}" if f["ip"] else "")
-    lock = f" and the {f['locked_what']} was locked" if f["session_locked"] else ""
+    lock = f" and the tripwire locked the {f['locked_what']} automatically" if f["session_locked"] else ""
     s = []
 
     if logins:
@@ -383,11 +397,11 @@ def _drive_template(f):
     if locked:
         when = "" if wait is None else " " + _later(wait)
         if len(locked) == 1:
-            s.append(f"Dyepack locked {locked[0]} in place{when} and it now sits there as "
+            s.append(f"Dyepack automatically locked {locked[0]} in place{when} and it now sits there as "
                      f"{os.path.basename(locked[0])}.dye.")
         else:
             shown = locked if len(locked) < 5 else locked[:3] + [f"{len(locked) - 3} more files"]
-            s.append(f"Dyepack locked {_join(shown)} in place{when} and they now sit there as .dye files.")
+            s.append(f"Dyepack automatically locked {_join(shown)} in place{when} and they now sit there as .dye files.")
 
     if host:
         s.append(f"Check what else it read on {host} because only the decoys are watched there.")
@@ -420,6 +434,29 @@ def _tidy(text):
     return cut.group(0) if cut else text
 
 
+def _for_model(f):
+    """The facts the way the model should read them: plain words, finished times and no zero speeds."""
+    raw = ("looks_like", "seconds_to_first_alarm", "seconds_to_lock", "session_locked", "locked_what", "outside",
+           "recommended_actions", "canaries_touched", "canary_ids", "alarm_reasons")
+    m = {k: v for k, v in f.items() if k not in raw}
+    m["what_set_it_off"] = [_SAID.get(r, r) for r in f["alarm_reasons"]]
+    m["pace_looks_like"] = MACHINE if f["looks_like"] == "ai_agent" else "a person"
+    if f["seconds_to_first_alarm"] is not None:
+        m["caught_in"] = _dur(f["seconds_to_first_alarm"]) + " after its first read or file open"
+    for k in ("peak_rows_per_minute", "peak_files_per_minute"):
+        if not m.get(k):
+            m.pop(k, None)
+    if "canaries_touched" in f:
+        m["canary_customers_touched"], m["canary_customer_ids"] = f["canaries_touched"], f["canary_ids"]
+    if "session_locked" in f:
+        m["lock"] = f"the tripwire locked the {f['locked_what']} automatically" if f["session_locked"] else "nothing"
+    if f.get("seconds_to_lock") is not None:
+        wait = f["seconds_to_lock"]
+        m["files_locked"] = "automatically, " + (
+            "at the same moment as the first alarm" if wait < 0.0005 else f"{_dur(wait)} after the first alarm")
+    return m
+
+
 def write_report(incident, events, client=None):
     """Plain English report for one incident.
 
@@ -434,10 +471,11 @@ def write_report(incident, events, client=None):
     try:
         text = _tidy(client.chat([
             {"role": "system", "content": REPORT_PROMPT + (DRIVE_PROMPT if f.get("kind") == _DRIVE else "")},
-            {"role": "user", "content": "Facts: " + json.dumps(f)},
+            {"role": "user", "content": "Facts: " + json.dumps(_for_model(f))},
         ]))
     except Exception:
         return report
+    text = _LEAD.sub(lambda m: m.group(1) + "Next, ", text)
     if len(text) < 40:
         return report
     return {**report, "text": text, "source": "databricks"}
