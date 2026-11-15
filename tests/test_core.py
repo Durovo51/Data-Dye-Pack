@@ -498,6 +498,63 @@ class ServerTest(unittest.TestCase):
         self.assertEqual([b["files"] for b in bursts], [["customers.csv.dye"], ["invoices.json.dye"]])
         self.assertEqual(self.app.burst.burst_drive.call_count, 1)  # the whole drive, once per incident
 
+    def test_banner_never_prints_the_control_token(self):
+        text = "\n".join(server.banner(self.app, 8750))
+        self.assertNotIn(self.app.token, text)
+        self.assertIn("http://127.0.0.1:8750/", text)
+        self.assertIn("control_token", text)
+
+    def test_drive_lock_never_waits_behind_slow_reports(self):
+        gate, drive = threading.Event(), self.data / "drive"
+        old = self.app.drive, self.app.burst
+        self.app.drive = mock.Mock(vault_password=lambda: "pw")
+        self.app.burst = mock.Mock(burst_drive=mock.Mock(return_value={
+            "folder": str(drive), "folders": [str(drive / "customers")], "files": ["customers/customers.csv"],
+            "vault": [str(drive / "customers" / "customers.csv.dye")], "skipped": []}))
+        try:
+            for _ in range(8):  # every slow worker busy, the way model reports and Databricks pushes pile up
+                self.app.pool.submit(gate.wait, 10)
+            iid, start = f"inc-slow-{time.time()}", time.time()
+            self.app._schedule_burst(iid, str(drive / "customers" / "all_customers_full_export_2026.csv"))
+            while not self.events("burst", incident=iid) and time.time() - start < 3:
+                time.sleep(0.02)
+            self.assertTrue(self.events("burst", incident=iid), "the drive lock waited behind the slow pool")
+            self.assertLess(time.time() - start, 1.0)
+        finally:
+            gate.set()
+            self.app.drive, self.app.burst = old
+
+    def test_each_incident_level_alerts_once_even_when_alerts_run_late(self):
+        sent, gate, ip = [], threading.Event(), "198.51.100.77"
+
+        def send(alert, channels):
+            sent.append((alert["id"], alert["severity"], tuple(channels)))
+            return [{"channel": c, "status": "sent"} for c in channels]
+
+        old = self.app.notify, self.app.routes
+        self.app.notify = mock.Mock(send=send)
+        self.app.routes = {"low": [], "high": ["push"], "critical": ["push", "sms"]}
+        try:
+            for _ in range(2):  # hold the alert workers so every alert runs after the incident is critical
+                self.app.urgent.submit(gate.wait, 10)
+            for user in ("nobody.ab12", "nobody.cd34", "nobody.ef56"):
+                self.call("POST", "/portal/login", {"user": user, "password": "x"}, ip=ip)
+            canary_user = next(c["portal_user"] for c in canary.load_watch() if c.get("batch") == "table")
+            self.call("POST", "/portal/login", {"user": canary_user, "password": "x"}, ip=ip)
+            iid = self.events("alarm", ip=ip)[-1]["detail"]["incident"]
+            gate.set()
+            deadline = time.time() + 3
+            while not any(s[0] == iid and s[1] == "critical" for s in sent) and time.time() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.5)  # room for a late duplicate to show up
+            mine = [s for s in sent if s[0] == iid]
+            self.assertEqual([s for s in mine if s[1] == "critical"], [(iid, "critical", ("push", "sms"))])
+            self.assertEqual(len(mine), len(set(mine)))
+            self.assertTrue(all(s[1] in ("high", "critical") for s in mine))
+        finally:
+            gate.set()
+            self.app.notify, self.app.routes = old
+
     def test_linux_agent_hits_through_the_bridge(self):
         hit = {"event_id": "ev-1", "server_id": "web-01", "timestamp": time.time(), "file": "/srv/backup/all.csv",
                "process": "/usr/bin/python3", "pid": 77, "access_type": "read", "source": "auditd"}

@@ -69,8 +69,10 @@ class App:
             raise RuntimeError("no lab yet, run dyepack lab and dyepack seed first")
         self.quiet = quiet
         self.log, self.clients, self.pending, self.burst_incidents = [], [], set(), set()
+        self.alerted = {}  # incident id -> the highest level already sent, so each level alerts once
         self.lock, self.export_lock = threading.Lock(), threading.Lock()
-        self.pool = ThreadPoolExecutor(max_workers=4)
+        self.pool = ThreadPoolExecutor(max_workers=4)  # slow work: Databricks pushes and model reports
+        self.urgent = ThreadPoolExecutor(max_workers=2)  # the drive lock and alerts never wait behind reports
         self.assay, self.notify, self.burst, self.drive, self.honey = map(
             _optional, ("assay", "notify", "burst", "drive", "honey"))
         bricks = _optional("databricks")
@@ -131,8 +133,11 @@ class App:
         # a remote agent's hit only alarms. bursting is for decoys this machine's sentinel saw
         if alarm["detail"]["reason"] == "decoy_open" and alarm["ip"] == "127.0.0.1":
             self._schedule_burst(inc["id"], alarm["detail"]["path"])
+        if opened:
+            self.alerted.pop(inc["id"], None)  # a dismissed incident that fires again alerts again
         if opened or escalated:
-            self.pool.submit(self._alert, inc["id"], alarm)
+            # the level is fixed now. read later, every queued alert would go out at the newest level
+            self.urgent.submit(self._alert, inc["id"], alarm, inc["severity"])
         if RANK[inc["severity"]] >= RANK["high"]:
             self._schedule_report(inc["id"])
 
@@ -160,10 +165,14 @@ class App:
             return f"Canary customer {who} tried at the login page. It only exists in {where}."
         return f"Someone outside contacted canary customer {who}. It only exists in {where}."
 
-    def _alert(self, iid, alarm):
+    def _alert(self, iid, alarm, severity=None):
         with self.trip.mutex:
             inc = self.trip.incidents[iid]
-            severity = inc["severity"]
+            severity = severity or inc["severity"]
+            # one alert per level per incident. a level already sent, or a lower one arriving late, stays quiet
+            if RANK[severity] <= RANK[self.alerted.get(iid, "info")]:
+                return
+            self.alerted[iid] = severity
             # notify trims to 140 characters too. this is exactly the text sent
             summary = " ".join(self._summary(inc, alarm).split())[:140]
         channels = self.routes.get(severity, [])
@@ -209,7 +218,7 @@ class App:
             if iid in self.burst_incidents:
                 return  # the whole drive already went for this incident
             self.burst_incidents.add(iid)
-        self.pool.submit(self._burst, iid)
+        self.urgent.submit(self._burst, iid)
 
     def _burst(self, iid):
         password = self.drive.vault_password() if self.drive else None
@@ -574,6 +583,27 @@ def start(port=schema.DEFAULT_PORT, quiet=False):
     return httpd, app
 
 
+def banner(app, port):
+    """The startup lines. The control token never goes in them: anyone watching the terminal, a screen
+    recording or a pasted log would get it. serve --open hands it to the browser instead."""
+    watched = canary.load_watch()
+    batches = {}
+    for c in watched:
+        key = c["batch"] if c["batch"] in ("table", "drive") else "exports"
+        batches[key] = batches.get(key, 0) + 1
+    routes = "  ".join(f"{sev}: {', '.join(ch) or 'dashboard only'}" for sev, ch in app.routes.items())
+    return [
+        f"Data Dyepack is watching Lakeview Fiber at http://127.0.0.1:{port}/",
+        f"  mine map          http://127.0.0.1:{port}/  (serve --open opens it with the control token)",
+        f"  control token     in {schema.DATA_DIR / 'control_token'}, owner only and never printed",
+        f"  canaries watched  {len(watched):,} ({', '.join(f'{n:,} {k}' for k, n in batches.items())})",
+        f"  decoy files       {len(app.trip.decoys)}",
+        f"  reports           {'Databricks model' if app.client else 'template (no Databricks .env)'}",
+        f"  alert routes      {routes}",
+        "press Ctrl+C to stop",
+    ]
+
+
 def cmd_serve(args):
     try:
         httpd, app = start(args.port)
@@ -583,20 +613,10 @@ def cmd_serve(args):
     except OSError:
         print(f"port {args.port} is busy, is dyepack serve already running?", file=sys.stderr)
         return 1
-    watched = canary.load_watch()
-    batches = {}
-    for c in watched:
-        key = c["batch"] if c["batch"] in ("table", "drive") else "exports"
-        batches[key] = batches.get(key, 0) + 1
-    routes = "  ".join(f"{sev}: {', '.join(ch) or 'dashboard only'}" for sev, ch in app.routes.items())
-    print(f"Data Dyepack is watching Lakeview Fiber at http://127.0.0.1:{args.port}/")
-    print(f"  mine map          http://127.0.0.1:{args.port}/?token={app.token}  (the token also sits in "
-          f"{schema.DATA_DIR / 'control_token'})")
-    print(f"  canaries watched  {len(watched):,} ({', '.join(f'{n:,} {k}' for k, n in batches.items())})")
-    print(f"  decoy files       {len(app.trip.decoys)}")
-    print(f"  reports           {'Databricks model' if app.client else 'template (no Databricks .env)'}")
-    print(f"  alert routes      {routes}")
-    print("press Ctrl+C to stop", flush=True)
+    print("\n".join(banner(app, args.port)), flush=True)
+    if getattr(args, "open", False):
+        import webbrowser
+        webbrowser.open(f"http://127.0.0.1:{args.port}/?token={app.token}")  # the map drops it from the bar
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -604,4 +624,5 @@ def cmd_serve(args):
     finally:
         httpd.server_close()
         app.pool.shutdown(wait=False)
+        app.urgent.shutdown(wait=False)
     return 0
