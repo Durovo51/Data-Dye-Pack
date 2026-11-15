@@ -1,110 +1,152 @@
 # Data Dyepack
 
+![tests](https://github.com/Durovo51/Data-Dye-Pack/actions/workflows/ci.yml/badge.svg)
+
 **Let them dig. Everything they take comes out stained.**
 
-When an AI agent breaks into a company, it does not read one table. It reads everything it can
-reach and copies it out fast. Data Dyepack plants dye packs in that data. The moment an
-agent touches the bait, Dyepack spots it, locks the rest of the drive so the agent leaves with
-locked files it cannot read and marks the exact copy that leaked so the team knows who took
-what.
+An AI agent that gets into a company reads everything it can reach and copies it out fast.
+Data Dyepack plants dye packs in customer data. When an agent touches the bait, Dyepack catches
+it within a second, locks every customer file on the drive in place and marks the exact copy
+that leaked.
 
-Built for the MadHacks 2026 TDS Privacy and Security challenge.
+## How it works
 
-## What it does
+| Piece | What it does |
+|---|---|
+| Canary customers | Fake customers mixed into the real table and listed on a separate watch list. No real person or app ever touches one, so a read at machine speed or any use of one (a login, an email, a call) is a true alarm. Canaries travel with stolen data and name the copy they came from. |
+| Decoy files | Bait files on the company drive, like a "full customer export" or an "unencrypted backup". No real workflow opens them, so any read is a strong signal. |
+| Lock in place | When a decoy is read, every customer file on the drive is honey locked where it sits: `customers.csv` becomes `customers.csv.dye`. Your own apps fail loudly instead of quietly reading fakes. `dyepack unlock` restores every byte. |
+| Honey encryption | A stolen `.dye` file opens to a believable fake customer list for every wrong password, so a thief can never tell which guess was right. |
+| Speed alarm | Reading over 600 customers a minute is machine speed. It counts per session, per staff login and per address, so a stolen login can't pace itself under the limit. |
+| Dashboard | A live console with the read speed, time to containment, a plain English report written by a model on Databricks, phone alerts and a draft breach notice. |
 
-- **Canary customers.** Fake customers are mixed into the real table and kept on a separate
-  watch list. No real person or app ever touches one, so a touch at machine speed or any use
-  of one (a login, an email, a call), is a true alarm. A canary travels with stolen data, so
-  it fires even days later, wherever the copy went and the alarm names that copy.
-- **A decoy drive.** A company drive holds decoy files among the real ones, like an
-  "all customers full export" and an "unencrypted backup". No real workflow opens them, so any
-  read is a strong signal.
-- **Lock in place.** When a decoy is read, Dyepack honey locks every customer file on the whole
-  drive where it sits. `customers.csv` becomes `customers.csv.dye`. The company's own apps fail
-  loudly and one command puts every file back byte for byte.
-- **Honey encryption.** A stolen `.dye` file opens to a believable fake customer list for every
-  wrong password, so a thief can never tell which guess was right. The real list is the only one
-  that carries the canaries.
-- **A speed alarm.** Anything reading over 600 customers a minute is machine speed. A person
-  never reads that fast. The alarm counts per login and per address, so a stolen login cannot
-  dodge it by reconnecting.
-- **A live dashboard.** Every alarm lands on a console with a plain English report, a read speed
-  chart, the time to containment, a phone push and a draft breach notice. The report and triage
-  are written by a model served on Databricks.
+## Measured results
 
-## The demo in one minute
+- A normal day of support work: 0 alarms.
+- A stolen staff login reading in bulk: locked within the first page or two (100 to 200 rows) in under a second.
+- An agent opening a decoy: the whole drive locked 515 ms later.
+- 50 wrong passwords on a stolen export: 50 believable fake lists. A 70B model asked to find the real one out of five picked wrong.
 
-1. A normal day of support work raises zero alarms.
-2. A phished support login reads customers in bulk. Caught and locked after two pages, about
-   200 rows out, in under a second.
-3. The thief steals an export and cracks it. Every one of fifty wrong passwords opens a
-   believable fake list and the served model cannot pick the real one out of five.
-4. The thief uses a stolen login. The alarm fires and names the exact export it came from.
-5. An AI agent is pointed at the company drive. It trips a decoy in a few hundredths of a
-   second, the whole drive locks in place, the phone buzzes and the agent is left with locked
-   files and fakes.
-
-## Run it
+## Quick start
 
 Needs Python 3.10 or newer. No third party packages.
 
 ```bash
-pip install -e .
+git clone https://github.com/Durovo51/Data-Dye-Pack.git && cd Data-Dye-Pack
 ```
 
 ```bash
-dyepack lab && dyepack seed && dyepack drive
-```
-
-Set a lock password in a `.env` file (copy `.env.example`):
-
-```
-DYEPACK_LOCK_PASSWORD=pick-any-phrase-you-will-remember
-```
-
-Start the server and open the dashboard:
-
-```bash
-dyepack serve
-```
-
-Run the demo drill:
-
-```bash
-dyepack drill heist
+python3 -m dyepack lab && python3 -m dyepack seed && python3 -m dyepack drive
 ```
 
 ```bash
-dyepack drill agent
+cp .env.example .env
 ```
 
-To watch the whole file system live, run the watcher next to the server. On macOS it reads the
-system event stream and needs Full Disk Access for your terminal plus `sudo`. On Linux it uses
-inotify and needs no root. The full Linux server walk through is in
-[docs/linux-server-demo.md](docs/linux-server-demo.md).
+Set `DYEPACK_LOCK_PASSWORD` in `.env` to a password only you know. Then start the server. `--open`
+opens the dashboard in your browser.
 
 ```bash
-sudo dyepack sentinel
+python3 -m dyepack serve --open
 ```
+
+Run every command from the repo folder. `pip install -e .` adds a shorter `dyepack` command.
+
+## Watch the drive
+
+The sentinel reports every file opened on the company drive to the server.
+
+On macOS it reads the system event stream, so it needs root and Full Disk Access for your
+terminal app (System Settings > Privacy & Security > Full Disk Access):
+
+```bash
+sudo python3 -m dyepack sentinel
+```
+
+On Linux it uses inotify and needs no root:
+
+```bash
+python3 -m dyepack sentinel
+```
+
+Full Linux setup, including a server without a desktop: [docs/linux.md](docs/linux.md).
+
+## Try it with a drill
+
+A drill plays an attack against your own setup so you can see what Dyepack catches.
+
+| Command | What it plays |
+|---|---|
+| `python3 -m dyepack drill normal` | A normal day of support lookups. Expect 0 alarms. |
+| `python3 -m dyepack drill heist` | A stolen staff login reads in bulk, steals and cracks an export, then tries the stolen logins. |
+| `python3 -m dyepack drill agent` | An agent reads the company drive. Needs the sentinel running or `--simulate-sentinel`. |
+| `python3 -m dyepack drill agent --real --cmd '<agent command> "{task}"'` | Runs a real AI coding agent inside the drive with the task "find and summarize the customer data here". |
+
+Put the drive back afterwards:
+
+```bash
+python3 -m dyepack unlock
+```
+
+## Configuration
+
+Settings live in `.env` (start from `.env.example`). Only the lock password is required.
+
+| Setting | Use |
+|---|---|
+| `DYEPACK_LOCK_PASSWORD` | Locks and unlocks `.dye` files. Required for the drive lock. |
+| `DATABRICKS_HOST`, `DATABRICKS_TOKEN`, `DATABRICKS_WAREHOUSE_ID`, `DATABRICKS_MODEL` | A chat model served on Databricks writes the reports and triage. Alarms land in Delta tables. `DATABRICKS_CATALOG` and `DATABRICKS_SCHEMA` default to `workspace` and `dyepack`. Without these, reports use a built in template. |
+| `NTFY_TOPIC` | Phone push through ntfy. Get a private topic with `python3 -m dyepack.notify topic`. |
+| `DISCORD_WEBHOOK_URL` | Alerts to a Discord channel. |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM`, `ALERT_SMS_TO` | Real SMS. Without them SMS is simulated on the dashboard. |
+
+Two environment variables move things around: `DYEPACK_DRIVE` (the company drive, default
+`~/LakeviewFiber`) and `DYEPACK_DATA` (the lab data, default `data/`).
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `lab` | Builds the lab table of made up customers (`--customers`, default 50,000). |
+| `seed` | Plants canary customers (`--every`, default one per 250). |
+| `drive` | Writes the company drive with its decoy files. |
+| `serve` | Runs the customer API, the login page and the dashboard on 127.0.0.1:8750 (`--open`, `--port`). |
+| `sentinel` | Watches the drive and reports file opens to the server. |
+| `drill` | Plays `normal`, `heist` or `agent` against your setup. |
+| `lock`, `open` | Honey locks the table into a file or opens one with a password. |
+| `prove` | Shows the real list lands in the middle of the fakes (`--compare` shows a naive header giving it away). |
+| `burst` | Locks one drive folder's customer files in place by hand. |
+| `unlock` | Puts locked files back byte for byte. |
 
 ## Databricks
 
-Reports and the triage card are written by a chat model served on Databricks and the alarm
-history lands in Delta tables for a dashboard and Genie questions. Copy `.env.example` to `.env`
-and fill in the host, warehouse, model and a token. Without them the reports fall back to a
-built in template and the rest of the demo is the same.
+With the Databricks settings filled in, a chat model served on Databricks writes each incident
+report and the triage card. Every alarm, report and export lands in Delta tables. The
+notebooks in `notebooks/` seed the canary watch list into a locked schema and build the alarms
+dashboard.
 
-## Honest limits
+## Tests
 
-- In the lab every customer is made up. In production, canary emails and phone numbers are ones
-  the company owns, so a thief who reaches out lands on the company, never on a stranger.
-- In the lab the lock password sits in `.env` so the demo runs on one laptop. In production it
-  lives in a key manager on a separate system and unlocking takes two people.
-- Honey encryption hides the real list only as well as its header matches where the data really
-  came from. A real company needs a header from a population model, not from the list being
-  locked.
-- Lock in place covers customer tables (CSV, JSON, SQLite), not arbitrary files. The sentinel on
-  Linux sees the file but not the program, so registered tools are matched on macOS or through
-  the auditd agent.
-- Dyepack names everything an agent read before the lock. It does not claim to stop the first
-  read. It makes everything after it worthless and marks what left.
+```bash
+python3 -m unittest discover -s tests -t .
+```
+
+CI runs the suite on Python 3.10 and 3.12.
+
+## Security notes and limits
+
+- The server listens on 127.0.0.1 only. The response buttons need a control token that changes on
+  every start and is never printed.
+- The lab is made up end to end. In production, canary emails and phone numbers should be ones the
+  company owns, so a thief who reaches out lands on the company, never on a stranger.
+- In the lab the lock password sits in `.env`. In production it belongs in a key manager on a
+  separate system, with two people needed to unlock.
+- Honey encryption hides the real list only as well as its header matches the real population.
+  Build the header from a population model, never from the list being locked.
+- Lock in place covers CSV and JSON customer tables, not arbitrary files.
+- Dyepack names everything read before the lock. It doesn't stop the first read. It makes
+  everything after it worthless and marks what left.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

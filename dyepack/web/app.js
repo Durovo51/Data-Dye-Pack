@@ -5,7 +5,10 @@ const TABLE_ROWS = 50000;
 const CANARIES = 200;
 const VEINS = 5;
 const WINDOW = 180; // seconds on the speed chart
-const REPLAY = new URLSearchParams(location.search).has("replay");
+// dyepack serve only listens on this machine. Any other host is a static copy with no live
+// server behind it, so it always plays the recorded drill.
+const LOCAL = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(location.hostname);
+const REPLAY = !LOCAL || new URLSearchParams(location.search).has("replay");
 // Keep the server's control link out of the address bar and retain access in this tab.
 let controlToken = (() => {
   const q = new URLSearchParams(location.search);
@@ -1670,6 +1673,8 @@ if (REPLAY) {
   document.body.dataset.replay = "true";
   $("launch-watch").href = "#activity";
   $("launch-watch").firstChild.textContent = "View replay activity";
+  // a static copy has no live stream to go back to
+  if (!LOCAL) document.querySelector(".back-live").hidden = true;
 }
 for (const control of document.querySelectorAll("[data-range]")) {
   control.addEventListener("click", () => {

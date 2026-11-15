@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "data-dyepack"
 version = "0.1.0"
-description = "Dye packs for customer data: canary customers, honey encrypted exports and a speed alarm."
+description = "Dye packs for customer data: canary customers, decoy files that lock the drive in place, honey encryption and a speed alarm."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
