@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Install Data Dyepack, run a security drill, review incidents, and restore the lab drive.">
+  <meta name="theme-color" content="#0b1015">
+  <title>User Guide | Data Dyepack</title>
+  <link rel="stylesheet" href="site.css">
+</head>
+<body class="guide">
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="topbar">
+    <div class="wrap nav">
+      <a class="brand" href="index.html">Data Dyepack</a>
+      <nav aria-label="Main navigation">
+        <a href="guide.html" aria-current="page">User guide</a>
+        <a href="https://github.com/Durovo51/Data-Dye-Pack">GitHub <span aria-hidden="true">↗</span></a>
+      </nav>
+    </div>
+  </header>
+  <main id="main">
+    <header class="guide-lead">
+      <div class="wrap">
+        <h1>Data Dyepack user guide</h1>
+        <p>Set up the Lakeview Fiber lab, run a security drill, and investigate what happened.</p>
+      </div>
+    </header>
+    <div class="wrap guide-grid">
+      <nav class="toc" aria-label="On this page">
+        <h2>On this page</h2>
+        <ul>
+          <li><a href="#how-it-works">How it works</a></li>
+          <li><a href="#start-the-lab">Start the lab</a></li>
+          <li><a href="#see-a-complete-incident">See a complete incident</a></li>
+          <li><a href="#watch-actual-file-reads">Watch actual file reads</a></li>
+          <li><a href="#run-the-other-drills">Run the other drills</a></li>
+          <li><a href="#investigate-and-respond">Investigate and respond</a></li>
+          <li><a href="#export-lock-and-recover-files">Export, lock, and recover files</a></li>
+          <li><a href="#notifications-and-reports">Notifications and reports</a></li>
+          <li><a href="#paths-and-ports">Paths and ports</a></li>
+          <li><a href="#command-reference">Command reference</a></li>
+          <li><a href="#lab-http-api">Lab HTTP API</a></li>
+          <li><a href="#troubleshooting">Troubleshooting</a></li>
+        </ul>
+      </nav>
+      <article class="prose">
+        <h2 id="how-it-works">How it works</h2>
+
+        <p>Data Dyepack is a local security lab for a fictional internet provider called Lakeview Fiber. It shows what happens when someone reads customer records in bulk, opens a bait file, or tries to use a planted customer identity.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">What Dyepack watches</th><th scope="col">What happens</th></tr></thead>
+            <tbody>
+              <tr><td>Customer API reads</td><td>The lab tracks read speed across sessions, staff logins, and IP addresses. A read rate above 600 rows per minute or repeated hits on distinct canaries can lock the staff login&#x27;s active sessions. The request that triggers the lock can still return data.</td></tr>
+              <tr><td>Canary identities</td><td>A canary is a planted customer record. A canary portal login or simulated contact raises a critical alert. An export-specific canary can identify which copy the record came from.</td></tr>
+              <tr><td>Decoy files</td><td>A local sentinel reports reads of bait files, such as the apparent full customer export. A decoy read raises a critical alert and triggers a lock of eligible customer files across the configured drive.</td></tr>
+              <tr><td>Honey-locked copies</td><td>The correct password for a <code>.dye</code> file reveals the original rows. Wrong passwords produce plausible synthetic rows. A plausible result from <code>open</code> does not verify a password.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="start-the-lab">Start the lab</h2>
+
+        <p>You need Git, Python 3.10 or newer, and a browser. The lab uses Python&#x27;s standard library. Use the generated data and a dedicated lab drive folder. The setup writes files into that folder and the drills can temporarily replace its customer files with <code>.dye</code> copies.</p>
+
+        <p><strong>1. Get the source and configure a lock password.</strong> If you already have the repository, open a terminal in its root and start with the <code>.env</code> step.</p>
+
+        <pre><code>git clone https://github.com/Durovo51/Data-Dye-Pack.git &amp;&amp; cd Data-Dye-Pack</code></pre>
+
+        <pre><code>([ -f .env ] || cp .env.example .env) &amp;&amp; chmod 600 .env &amp;&amp; nano .env</code></pre>
+
+        <p>Set <code>DYEPACK_LOCK_PASSWORD</code> in <code>.env</code> to a lab-only password you can retrieve later. In Nano, use <strong>Ctrl+O</strong>, <strong>Enter</strong>, then <strong>Ctrl+X</strong>. The drive builder uses the password for the nightly backup, and Dyepack uses it again to lock and restore customer files.</p>
+
+        <p><strong>2. Build the data and drive.</strong> Run this from the repository root. The default drive is <code>~/LakeviewFiber</code>. If that folder already contains files you care about, set <code>DYEPACK_DRIVE</code> to a dedicated path first. See <a href="#paths-and-ports">Paths and ports</a>.</p>
+
+        <pre><code>python3 -m dyepack lab &amp;&amp;
+python3 -m dyepack seed &amp;&amp;
+python3 -m dyepack drive</code></pre>
+
+        <p>At the defaults, <code>lab</code> creates 50,000 fictional customers, <code>seed</code> plants 200 table canaries, and <code>drive</code> writes the sample customer files, nightly backup, and four bait files. Additional terminals should start from the same repository root.</p>
+
+        <p><strong>3. Start the server and open the dashboard.</strong> Leave this terminal running.</p>
+
+        <pre><code>python3 -m dyepack serve --open</code></pre>
+
+        <p>The server binds to <code>127.0.0.1:8750</code>. The <code>--open</code> flag opens a browser tab with the control token so you can take incident actions and change alert routes. A tab opened at the plain address starts in read-only mode unless it already holds the current token. The server creates a new token on each start.</p>
+
+        <h2 id="see-a-complete-incident">See a complete incident</h2>
+
+        <p><strong>Recorded demo.</strong> On <strong>Overview</strong>, select <strong>Watch the recorded drill</strong>. Switch to <strong>Alerts</strong> as incidents appear. The playback bar lets you pause, restart, or switch from <strong>1×</strong> to <strong>4×</strong>. Response actions and routing changes in this mode affect only the replay. Select <strong>End replay</strong> to return to live mode on the local server. A static deployment of the dashboard plays the recording automatically.</p>
+
+        <p><strong>Live demo without watcher setup.</strong> Keep the server open and run the following in a second terminal from the repository root.</p>
+
+        <pre><code>python3 -m dyepack drill agent --simulate-sentinel</code></pre>
+
+        <p>Open <strong>Alerts</strong> and select the decoy incident. Look for the decoy path, <strong>Locked files</strong>, and the lock events under <strong>Activity</strong>. For example, <code>customers/customers.csv</code> becomes <code>customers/customers.csv.dye</code>. The simulated watcher reports the scripted reader&#x27;s file activity after the reader finishes. Use a real sentinel to observe detection while files are being read. Both modes can lock the actual files in the lab folder.</p>
+
+        <p>Restore the files when you finish:</p>
+
+        <pre><code>python3 -m dyepack unlock</code></pre>
+
+        <h2 id="watch-actual-file-reads">Watch actual file reads</h2>
+
+        <p>Start the sentinel in a second terminal while the server runs. Keep it running during file drills.</p>
+
+        <p><strong>macOS 13 or later.</strong> Give your terminal app <strong>Full Disk Access</strong> under <strong>System Settings → Privacy &amp; Security</strong>. Start the watcher with elevated privileges. <a href="https://support.apple.com/en-bw/guide/mac-help/mchl211c911f/mac">Apple&#x27;s Privacy &amp; Security settings guide</a></p>
+
+        <pre><code>sudo python3 -m dyepack sentinel</code></pre>
+
+        <p><strong>Linux.</strong> Run the watcher as your normal user. The inotify backend sees file activity, but it cannot identify the process or user that opened a file. <a href="https://man7.org/linux/man-pages/man7/inotify.7.html">Linux inotify manual</a></p>
+
+        <pre><code>python3 -m dyepack sentinel</code></pre>
+
+        <p>With the sentinel running, use a third terminal to run the built-in reader. Or open one known bait file to test that specific trigger.</p>
+
+        <pre><code>python3 -m dyepack drill agent</code></pre>
+
+        <pre><code>head -n 1 &quot;${DYEPACK_DRIVE:-$HOME/LakeviewFiber}/customers/all_customers_full_export_2026.csv&quot;</code></pre>
+
+        <p>The bait file remains in place. Eligible customer-shaped CSV and JSON files up to 50 MiB can be locked. Ordinary notes, bait files, existing backups, and files outside the lab drive are outside the lock&#x27;s scope. A file-speed alert alone does not trigger the drive lock. Stop the sentinel or server with <strong>Ctrl+C</strong> in its own terminal.</p>
+
+        <h2 id="run-the-other-drills">Run the other drills</h2>
+
+        <p>Run these against the running local server. The normal and heist drills exercise the API and work without the file watcher. With notification credentials configured, a live drill can send real on-call alerts.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Command after <code>python3 -m dyepack</code></th><th scope="col">What to look for</th></tr></thead>
+            <tbody>
+              <tr><td><code>drill normal</code></td><td>Simulated support lookups for 60 seconds. On a fresh lab, expect zero alarms. Use <code>--seconds 15</code> for a shorter run.</td></tr>
+              <tr><td><code>drill heist</code></td><td>Three stages. A stolen staff login reads in bulk, a second login downloads a honey-locked export and guesses passwords, then simulated portal and contact attempts trigger alerts that can name the export.</td></tr>
+              <tr><td><code>drill heist --step 1</code></td><td>Run the bulk-read stage on its own. Check how many plaintext rows were returned before containment.</td></tr>
+              <tr><td><code>drill heist --step 2</code></td><td>Run the export and password-guess stage on its own. The optional Databricks model tries to identify the real list. The final stage requires data from the same run, so use the full heist to see stage 3.</td></tr>
+              <tr><td><code>drill agent</code></td><td>A scripted reader opens files on the company drive. Run it with the sentinel, or add <code>--simulate-sentinel</code> to test without it.</td></tr>
+              <tr><td><code>drill agent --real --cmd &#x27;YOUR_AGENT YOUR_PROMPT_FLAG &quot;{task}&quot;&#x27;</code></td><td>Replace the command and flag with those for an installed agent. Dyepack runs it inside the lab drive and substitutes the task <code>find and summarize the customer data here</code> into <code>{task}</code>. Keep the sentinel running. The agent runs with your user&#x27;s privileges.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>Each drill prints a JSON score in the terminal. The dashboard shows available results under <strong>Alerts → More options → Lab tools and settings → Lab diagnostics → Drill results</strong>.</p>
+
+        <h2 id="investigate-and-respond">Investigate and respond</h2>
+
+        <ol>
+          <li>In <strong>Overview</strong>, use <strong>Read speed</strong> to review the last 30 seconds or 3 minutes. <strong>Alert severity</strong> and <strong>Time to containment</strong> summarize observed incidents.</li>
+          <li>In <strong>Alerts</strong>, select an incident to see what triggered it, when it happened, and the estimated exposure. Expand <strong>Activity</strong> for the event timeline. Expand <strong>Report</strong> when it appears. High and critical incidents get an automatic report from a local template or, if configured and available, a Databricks model.</li>
+          <li>Use <strong>Actions</strong> if you have the control token. The menu shows only actions that apply to the selected incident.</li>
+        </ol>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Action</th><th scope="col">Effect in live mode</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Lock access</strong></td><td>Blocks the associated staff sessions or portal addresses. Automatic drive locking is triggered by a local decoy read.</td></tr>
+              <tr><td><strong>Revoke access</strong></td><td>Blocks affected staff logins and their active sessions, or blocks future downloads of the associated export. A copy already downloaded remains with its recipient.</td></tr>
+              <tr><td><strong>Prepare breach notice</strong></td><td>Adds an exposure estimate and a lab checklist to the incident. It includes plaintext rows and identifies copies recorded as locked. It sends no notices.</td></tr>
+              <tr><td><strong>Dismiss incident</strong></td><td>Marks it as a false alarm and releases its session or address locks. Use <code>unlock</code> separately to restore files. A revocation remains in effect for the current server run.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>The <strong>Lab diagnostics</strong> panel also shows customer table activity, observed file reads, and <strong>Export fingerprints</strong>. A matched export canary helps trace a copied record back to the export. An exposure count reflects activity observed by the lab and can include repeated reads.</p>
+
+        <h2 id="export-lock-and-recover-files">Export, lock, and recover files</h2>
+
+        <p><strong>Make a standalone honey-locked copy of the lab table.</strong> Run these from the repository root. <code>lock</code> asks for and confirms a password for this copy. <code>open</code> asks for that password and previews five rows by default. To see how the demo works, run <code>open</code> again and enter a different password.</p>
+
+        <pre><code>python3 -m dyepack lock demo.dye &amp;&amp;
+python3 -m dyepack open demo.dye --limit 5</code></pre>
+
+        <p><strong>Lock a folder manually.</strong> This locks eligible files directly inside the chosen drive folder and leaves its subfolders for separate runs.</p>
+
+        <pre><code>python3 -m dyepack burst &quot;${DYEPACK_DRIVE:-$HOME/LakeviewFiber}/customers&quot;</code></pre>
+
+        <p><strong>Recover locked drive files.</strong> The first command restores everything tracked as locked. Use the second command instead to restore just the named file.</p>
+
+        <pre><code>python3 -m dyepack unlock</code></pre>
+
+        <pre><code>python3 -m dyepack unlock &quot;${DYEPACK_DRIVE:-$HOME/LakeviewFiber}/customers/customers.csv.dye&quot;</code></pre>
+
+        <p><code>unlock</code> verifies a tracked file against the watch list, restores its original contents, and removes the <code>.dye</code> file after an in-place restore. It refuses to replace an existing destination. You can use <code>--to PATH</code> to recover one file to a new location and keep the <code>.dye</code> copy. <code>--force</code> is for a file made by <code>burst</code> whose watch-list record is missing. It cannot verify the recovered contents in that case and keeps the <code>.dye</code> copy. Use <code>open</code> for standalone exports and the demo nightly backup.</p>
+
+        <h3 id="reset-the-demo">Reset the demo</h3>
+
+        <ul>
+          <li>To clear live incidents, sessions, and revocations, stop and restart <code>serve</code>. Reopen with <code>--open</code> for a fresh control token. Files on disk and saved alert routes persist.</li>
+          <li>To restore the exact files from a drill, use <code>unlock</code> before rebuilding anything. To recreate the sample drive, stop the watcher and server, run <code>drive</code>, then start both again.</li>
+          <li>To start with a new database, run <code>lab</code>, <code>seed</code>, and <code>drive</code> with the server and watcher stopped. <code>lab</code> replaces the database, watch list, and generated API exports. Save any lab artifacts you need first.</li>
+        </ul>
+
+        <h2 id="notifications-and-reports">Notifications and reports</h2>
+
+        <p>Open <strong>Alerts → More options → Lab tools and settings → Alert routing</strong>. Choose the channels for each severity. The defaults are push and SMS for critical incidents, push for high, and dashboard only for low. <strong>Notification history</strong> shows the most recent delivery results.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Channel</th><th scope="col">What to configure in <code>.env</code></th></tr></thead>
+            <tbody>
+              <tr><td>Phone push</td><td>Run <code>python3 -m dyepack.notify topic</code>. Paste the generated value into <code>NTFY_TOPIC</code>, then subscribe to it in the ntfy app. Keep the topic private because anyone who knows it can read the alerts.</td></tr>
+              <tr><td>SMS</td><td>Set <code>TWILIO_ACCOUNT_SID</code>, <code>TWILIO_AUTH_TOKEN</code>, <code>TWILIO_FROM</code>, and <code>ALERT_SMS_TO</code>.</td></tr>
+              <tr><td>Discord</td><td>Set <code>DISCORD_WEBHOOK_URL</code> for the target channel. Enable Discord on the severities you want.</td></tr>
+              <tr><td>Email</td><td>The lab records a simulated delivery.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>Without credentials for a channel, its deliveries are simulated. To test the provider settings directly, run the command below. It attempts each channel and can send a real test notification to every configured destination.</p>
+
+        <pre><code>python3 -m dyepack.notify test</code></pre>
+
+        <p><strong>Databricks is optional.</strong> Set <code>DATABRICKS_HOST</code>, <code>DATABRICKS_TOKEN</code>, <code>DATABRICKS_WAREHOUSE_ID</code>, and <code>DATABRICKS_MODEL</code> in <code>.env</code>. The defaults for <code>DATABRICKS_CATALOG</code> and <code>DATABRICKS_SCHEMA</code> are <code>workspace</code> and <code>dyepack</code>. Use a token with access to the SQL warehouse, model endpoint, and target schema. The service writes alarm, report, and export events to Databricks tables and can generate incident reports with the model. The notebooks in <code>notebooks/</code> cover seeding a Databricks dataset and querying alarms. Verify both connections, then restart the server.</p>
+
+        <pre><code>python3 -m dyepack.databricks</code></pre>
+
+        <h2 id="paths-and-ports">Paths and ports</h2>
+
+        <ul>
+          <li><strong>Drive and lab data.</strong> The defaults are <code>~/LakeviewFiber</code> for the drive and <code>data/</code> inside the repository for lab data. To override either, use an absolute path without <code>..</code> components and export it in every terminal that runs Dyepack. Keep <code>watch_list.json</code>, <code>lab_logins.json</code>, and <code>control_token</code> private.</li>
+          <li><strong>Port.</strong> Use <code>serve --port 8760 --open</code> to change ports, then add <code>--url http://127.0.0.1:8760</code> to the drill and sentinel commands.</li>
+          <li><strong>Custom paths on macOS.</strong> Use <code>sudo python3 -m dyepack sentinel --root &quot;$DYEPACK_DRIVE&quot;</code> when using a custom drive. If you also set <code>DYEPACK_DATA</code>, pass it as an argument to <code>env</code> after <code>sudo</code> so the watcher can find the token.</li>
+          <li><strong>Headless Linux.</strong> Start <code>serve</code> on the server and run the SSH forward below on your laptop. Open <code>http://localhost:8750/</code> there. To enable controls, read <code>data/control_token</code> on the server, or <code>control_token</code> under your custom data directory. Open <code>http://localhost:8750/?token=YOUR_TOKEN</code> in the dashboard tab. The page removes the token from the address bar and retains it for that tab.</li>
+        </ul>
+
+        <pre><code>ssh -N -L 8750:127.0.0.1:8750 YOUR_USER@YOUR_SERVER</code></pre>
+
+        <p>For example, run this before setup and in each additional terminal to keep the lab drive in its own folder:</p>
+
+        <pre><code>export DYEPACK_DRIVE=&quot;$HOME/LakeviewFiber-Demo&quot;</code></pre>
+
+        <h2 id="command-reference">Command reference</h2>
+
+        <p>Run <code>python3 -m dyepack --help</code> or append <code>--help</code> to a specific command. <code>--version</code> prints the installed version. To use the shorter <code>dyepack</code> command, install from the repository with <code>python3 -m pip install -e .</code> in a virtual environment.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Command</th><th scope="col">Options and defaults</th></tr></thead>
+            <tbody>
+              <tr><td><code>lab</code></td><td><code>--customers 50000</code> sets the number of fictional customers. <code>--seed N</code> makes the customer generation repeatable.</td></tr>
+              <tr><td><code>seed</code></td><td><code>--every 250</code> sets the canary frequency. An already seeded lab refuses a second planting.</td></tr>
+              <tr><td><code>drive</code></td><td><code>--seed N</code> controls the sample of customer files generated for the drive.</td></tr>
+              <tr><td><code>serve</code></td><td><code>--open</code> opens the control-enabled dashboard. <code>--port 8750</code> sets the listener port.</td></tr>
+              <tr><td><code>sentinel</code></td><td><code>--root PATH</code> can be repeated. <code>--backend auto</code> picks <code>eslogger</code> on macOS or <code>inotify</code> on Linux. <code>--backend fake --source FILE</code> reads JSON Lines events, with standard input used when <code>--source</code> is omitted. <code>--quiet</code> hides per-event terminal output.</td></tr>
+              <tr><td><code>drill</code></td><td>Choose <code>normal</code>, <code>heist</code>, or <code>agent</code>. <code>--url</code> selects the local server address. See the drill table for mode-specific options.</td></tr>
+              <tr><td><code>lock OUT</code> and <code>open FILE</code></td><td>Both accept <code>--password</code> for automation. The interactive prompt keeps a password out of shell history. <code>open</code> also accepts <code>--limit N</code>.</td></tr>
+              <tr><td><code>prove</code></td><td>Runs a statistical comparison of original and synthetic lists. Defaults to <code>--rows 2000 --fakes 99</code>. Use <code>--compare</code> to compare three different ways of constructing the file&#x27;s distribution header.</td></tr>
+              <tr><td><code>burst FOLDER</code></td><td>Locks eligible customer files directly in that lab drive folder.</td></tr>
+              <tr><td><code>unlock</code> or <code>restore</code></td><td>Restore all tracked files or pass one or more <code>.dye</code> paths. Use <code>--to PATH</code> for a single output and <code>--force</code> only when the watch record is missing.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="lab-http-api">Lab HTTP API</h2>
+
+        <p>The API runs on loopback alongside the dashboard. Send JSON for POST requests. Use the <code>session</code> returned by staff login as the <code>X-Session</code> header on customer, export, and permit requests. With the server running on the default port, paste the following from the repository root to sign in as <code>rep.taylor</code> and read one sample row. The script reads the generated password from <code>lab_logins.json</code> without printing it.</p>
+
+        <pre><code>python3 - &lt;&lt;&#x27;PY&#x27;
+import json
+import os
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+base = &quot;http://127.0.0.1:8750&quot;
+logins = Path(os.environ.get(&quot;DYEPACK_DATA&quot;, &quot;data&quot;)) / &quot;lab_logins.json&quot;
+user = &quot;rep.taylor&quot;
+credentials = {&quot;user&quot;: user, &quot;password&quot;: json.loads(logins.read_text())[user]}
+login = Request(base + &quot;/api/login&quot;, data=json.dumps(credentials).encode(),
+                headers={&quot;Content-Type&quot;: &quot;application/json&quot;})
+with urlopen(login, timeout=10) as response:
+    session = json.load(response)[&quot;session&quot;]
+lookup = Request(base + &quot;/api/customers?page=0&amp;size=1&quot;,
+                 headers={&quot;X-Session&quot;: session})
+with urlopen(lookup, timeout=10) as response:
+    print(json.dumps(json.load(response), indent=2))
+PY</code></pre>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Request</th><th scope="col">How to use it</th></tr></thead>
+            <tbody>
+              <tr><td><code>POST /api/login</code></td><td>Send <code>user</code> and <code>password</code> to obtain a staff session.</td></tr>
+              <tr><td><code>GET /api/customers</code></td><td>List with <code>page</code> and <code>size</code>, or search with <code>q</code> and <code>limit</code>. Page numbers start at zero. A support page can return up to 100 rows. The <code>backup.nightly</code> job account sees the clean table and can page up to 1,000 rows.</td></tr>
+              <tr><td><code>GET /api/customers/ACCOUNT_NUMBER</code></td><td>Read one customer by account number.</td></tr>
+              <tr><td><code>POST /api/exports</code> and <code>GET /api/exports/EXPORT_ID</code></td><td>POST an export <code>password</code>, then use the returned <code>export_id</code> in the download path. Each file has its own export canaries.</td></tr>
+              <tr><td><code>POST /api/permits</code></td><td>A different staff login submits <code>who</code>, optionally <code>table</code> (default <code>customers</code>) and <code>minutes</code> (default 30). The permitted user&#x27;s reads are still logged. The permit suppresses the usual read alarms during that window.</td></tr>
+              <tr><td><code>POST /portal/login</code> and <code>POST /lab/contact</code></td><td>Simulate a portal login with <code>user</code> and <code>password</code>, or a contact attempt with <code>to</code> and optional <code>channel</code>. These are API endpoints. The contact route simulates a signal without delivering an email or placing a call.</td></tr>
+              <tr><td><code>GET /events</code></td><td>Read the server-sent events used by the live dashboard. <code>POST /lab/drill</code> is used by the built-in drills to post phase and score updates.</td></tr>
+              <tr><td><code>GET /api/alert-routes</code> and <code>POST /api/alert-routes</code></td><td>Read or replace the route mapping. POST the complete mapping with severity keys <code>low</code>, <code>high</code>, and <code>critical</code>.</td></tr>
+              <tr><td><code>POST /api/respond</code></td><td>Send <code>incident</code> and <code>action</code>. Actions are <code>lock</code>, <code>revoke</code>, <code>notify_customers</code>, and <code>dismiss</code>.</td></tr>
+              <tr><td><code>POST /lab/fs-event</code></td><td>The local sentinel&#x27;s input. Accepts a file event or a batch. The sent events include a path and operation, plus available process details.</td></tr>
+              <tr><td><code>POST /api/events</code></td><td>Optional auditd bridge. Send a decoy event with <code>file</code>, <code>server_id</code>, and available process details. An <code>event_id</code> or <code>Idempotency-Key</code> can deduplicate retries. Bridge alerts do not lock the local drive.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>Writing alert routes, posting responses, and posting local sentinel events require the current <code>X-Dyepack-Token</code>. A locked staff session returns HTTP 423 on protected reads. A revoked export returns HTTP 410 to an otherwise active session if the file still exists.</p>
+
+        <h2 id="troubleshooting">Troubleshooting</h2>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Symptom</th><th scope="col">What to check</th></tr></thead>
+            <tbody>
+              <tr><td>No alerts after opening a decoy</td><td>Make sure the sentinel watches the drive and you read the file contents. For a custom drive path, remove any <code>..</code> components. Restart the server after running <code>drive</code>. On macOS, check <strong>Full Disk Access</strong>.</td></tr>
+              <tr><td>Decoy alert with no locked files</td><td>Check <code>DYEPACK_LOCK_PASSWORD</code>, the server terminal, and whether files are already locked. A bridge event is alert-only.</td></tr>
+              <tr><td>Response controls are missing</td><td>Open a tab with <code>serve --open</code> or the current token. Check that the dashboard is live and select an incident with an available action.</td></tr>
+              <tr><td>Unlock reports that the original file already exists</td><td>Move the existing file aside or recover one file to a separate path with <code>--to</code>.</td></tr>
+              <tr><td>A repeat heist cannot log in</td><td>A previous <strong>Revoke access</strong> action may still apply. Restart <code>serve</code> and reopen the dashboard.</td></tr>
+              <tr><td>The report says <strong>Template</strong></td><td>Local reporting is working. Run the Databricks connection check if you expected model-generated text.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p class="source-version">Source version used for this guide is <a href="https://github.com/Durovo51/Data-Dye-Pack/commit/44bd33841d3d5e89a77ece36a8537266eb9764de"><code>main</code> at commit <code>44bd338</code></a>.</p>
+      </article>
+    </div>
+  </main>
+  <footer class="footer"><div class="wrap"><a href="index.html">Documentation home</a><a href="https://github.com/Durovo51/Data-Dye-Pack">View the source on GitHub <span aria-hidden="true">↗</span></a></div></footer>
+</body>
+</html>
