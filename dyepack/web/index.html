@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta name="description" content="Review and respond to Data Dyepack security alerts.">
-  <title>Alerts | Data Dyepack</title>
+  <meta name="description" content="Follow live read activity, suspicious access, and containment in Data Dyepack.">
+  <title>Data Dyepack</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 4 5v6c0 5 3.6 8.8 8 11 4.4-2.2 8-6 8-11V5z' fill='%233b4149'/%3E%3Cpath d='m8.5 12 2.4 2.4 4.6-4.8' fill='none' stroke='white' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
   <script type="module" src="app.js"></script>
@@ -18,9 +18,68 @@
     <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
     <symbol id="i-back" viewBox="0 0 24 24"><path d="m14 5-7 7 7 7"/></symbol>
   </svg>
-  <a class="skip" href="#main">Skip to alerts</a>
+  <a id="skip-view" class="skip" href="#overview">Skip to content</a>
+  <header class="product-nav">
+    <nav class="product-nav-inner" aria-label="Data Dyepack">
+      <a class="product-mark" href="#overview">Data Dyepack</a>
+      <div class="product-links">
+        <a id="overview-link" href="#overview" aria-current="page">Overview</a>
+        <a id="alerts-link" class="launch-button" href="#alerts">Alerts<span id="nav-alert-count" class="nav-alert-count" hidden></span></a>
+      </div>
+    </nav>
+  </header>
 
-  <main id="main" class="app" tabindex="-1">
+  <main id="overview" class="overview" tabindex="-1">
+    <section class="launch-hero" aria-labelledby="launch-heading">
+      <header class="launch-intro">
+        <h1 id="launch-heading">Every breach<br class="launch-break"> leaves a trace.</h1>
+        <p>See suspicious access and follow the response as it happens.</p>
+        <a id="launch-watch" class="launch-watch" href="?replay=1">Watch the recorded drill<svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></a>
+      </header>
+      <div class="launch-art" aria-hidden="true"></div>
+    </section>
+
+    <section id="activity" class="launch-activity" aria-labelledby="activity-heading">
+      <header class="activity-heading">
+        <h2 id="activity-heading">Activity</h2>
+        <p id="overview-conn" class="connection" role="status" data-state="connecting">Connecting</p>
+      </header>
+
+      <section class="launch-chart" aria-labelledby="traffic-heading">
+        <header class="chart-heading">
+          <div>
+            <h3 id="traffic-heading">Read speed</h3>
+            <p class="chart-value"><strong id="traffic-rate">–</strong><span>rows/min</span></p>
+          </div>
+          <div class="chart-period" role="group" aria-label="Read speed time range">
+            <button type="button" data-range="30" aria-pressed="false">30 sec</button>
+            <button type="button" data-range="180" aria-pressed="true">3 min</button>
+          </div>
+        </header>
+        <div id="traffic-chart" class="traffic-chart"></div>
+        <footer class="chart-caption">
+          <span id="traffic-peak">Waiting for read samples</span>
+          <span id="traffic-marker-key" class="marker-key" hidden>Alarm</span>
+        </footer>
+      </section>
+
+      <div class="activity-grid">
+        <section class="launch-metric" aria-labelledby="severity-heading">
+          <h3 id="severity-heading">Alert severity</h3>
+          <p class="metric-context">Highest severity reached per incident</p>
+          <dl id="severity-chart" class="severity-chart"></dl>
+        </section>
+        <section class="launch-metric" aria-labelledby="containment-heading">
+          <h3 id="containment-heading">Time to containment</h3>
+          <p class="metric-context">From first alarm to first containment action</p>
+          <p id="containment-empty" class="launch-empty">Waiting for alerts</p>
+          <ol id="containment-chart" class="containment-chart"></ol>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <main id="main" class="app" tabindex="-1" hidden>
     <aside class="alert-sidebar" aria-labelledby="alerts-heading">
       <header class="sidebar-heading">
         <div class="sidebar-title">
@@ -47,7 +106,6 @@
           <div id="action-items" class="menu-items"></div>
         </details>
         <div class="toolbar-status">
-          <span class="brand">Data Dyepack</span>
           <span id="conn" class="connection" data-state="connecting" role="status">Connecting</span>
         </div>
       </header>
@@ -83,15 +141,16 @@
       </div>
     </section>
 
-    <div id="player" class="player" aria-label="Recorded drill playback" hidden>
-      <span class="recording-label">Recorded drill</span>
-      <button id="play" class="button" type="button" disabled>Pause</button>
-      <span id="clock" class="clock">0:00 / 0:00</span>
-      <button id="restart" class="button" type="button" disabled>Restart</button>
-      <select id="replay-speed" class="button" aria-label="Playback speed" disabled><option value="1">1×</option><option value="4">4×</option></select>
-      <a class="back-live" href="./">End replay</a>
-    </div>
   </main>
+
+  <div id="player" class="player" aria-label="Recorded drill playback" hidden>
+    <span class="recording-label">Recorded drill</span>
+    <button id="play" class="button" type="button" disabled>Pause</button>
+    <span id="clock" class="clock">0:00 / 0:00</span>
+    <button id="restart" class="button" type="button" disabled>Restart</button>
+    <select id="replay-speed" class="button" aria-label="Playback speed" disabled><option value="1">1×</option><option value="4">4×</option></select>
+    <a class="back-live" href="./">End replay</a>
+  </div>
 
   <dialog id="lab-tools" class="tools" aria-labelledby="tools-title">
     <header class="sheet-header"><h2 id="tools-title">Lab Tools</h2><form method="dialog"><button class="button" type="submit" autofocus>Done</button></form></header>

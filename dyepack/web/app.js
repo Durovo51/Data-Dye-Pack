@@ -405,6 +405,162 @@ function handle(e) {
   }
 }
 
+// The launch overview reads the same events as the alert console.
+const observedIncidents = () => [...S.incidents.values()].filter((inc) => inc.alarms.length);
+let trafficWindow = WINDOW;
+let alertChartKey = "";
+
+function updateView() {
+  const hash = location.hash;
+  const focused = document.activeElement;
+  const alerts = /^#(?:alerts(?:\/|$)|main$)/.test(hash);
+  $("main").hidden = !alerts;
+  $("overview").hidden = alerts;
+  const current = alerts ? $("alerts-link") : $("overview-link");
+  const other = alerts ? $("overview-link") : $("alerts-link");
+  current.setAttribute("aria-current", "page");
+  other.removeAttribute("aria-current");
+  $("skip-view").href = alerts ? "#main" : "#overview";
+  document.title = alerts ? "Alerts | Data Dyepack" : "Data Dyepack";
+  if (alerts) {
+    const id = hash.match(/^#alerts\/(inc-\d+)$/)?.[1];
+    if (id && S.incidents.get(id)?.alarms.length) selectAlert(id, true);
+    else if (id) customSelection = false;
+    else $("main").dataset.detail = "false";
+    if (focused === $("alerts-link") || focused.closest(".containment-chart")) {
+      (matchMedia("(max-width: 700px)").matches && $("main").dataset.detail === "true"
+        ? $("incident-title") : $("alerts-heading")).focus({ preventScroll: true });
+    }
+  } else {
+    drawTraffic();
+    drawAlertCharts(observedIncidents());
+    if (hash === "#activity") $("activity").scrollIntoView({ block: "start" });
+    else if (hash === "#overview" || !hash) window.scrollTo(0, 0);
+  }
+}
+
+function drawTraffic() {
+  const box = $("traffic-chart");
+  const w = box.clientWidth, h = box.clientHeight;
+  if (!w || !h) return;
+  const end = S.now;
+  const start = end - trafficWindow;
+  const samples = S.ticks.filter(([ts]) => ts >= start);
+  const peak = Math.max(0, ...samples.map((sample) => sample[1]));
+  const step = 10 ** Math.floor(Math.log10(Math.max(peak, 100) / 4));
+  const max = Math.ceil(Math.max(peak, 100) / (step * 4)) * step * 4;
+  const left = w < 420 ? 34 : 50, right = w - 12, top = 13, bottom = h - 25;
+  const x = (ts) => left + ((ts - start) / trafficWindow) * (right - left);
+  const y = (v) => bottom - (v / max) * (bottom - top);
+  const root = svg("svg", { width: w, height: h, viewBox: `0 0 ${w} ${h}`, role: "img",
+    "aria-label": `Read speed during the last ${trafficWindow} seconds. ${samples.length ? `Peak ${fmt(peak)} rows per minute.` : "Waiting for samples."}` });
+  const area = svg("linearGradient", { id: "traffic-fill", x2: 0, y2: 1 });
+  area.append(svg("stop", { offset: 0, "stop-color": "#4798d2", "stop-opacity": .30 }),
+    svg("stop", { offset: .78, "stop-color": "#154577", "stop-opacity": .12 }),
+    svg("stop", { offset: 1, "stop-color": "#10243f", "stop-opacity": .02 }));
+  const beam = svg("linearGradient", { id: "traffic-beam", gradientUnits: "userSpaceOnUse",
+    x1: 0, x2: 0, y1: bottom, y2: top });
+  beam.append(svg("stop", { offset: 0, "stop-color": "#8ccfff" }),
+    svg("stop", { offset: .45, "stop-color": "#d8eeff" }),
+    svg("stop", { offset: 1, "stop-color": "#f5f9ff" }));
+  const edge = svg("linearGradient", { id: "traffic-edge", gradientUnits: "userSpaceOnUse",
+    x1: left, x2: right, y1: 0, y2: 0 });
+  edge.append(svg("stop", { offset: 0, "stop-color": "#91b7d8", "stop-opacity": .12 }),
+    svg("stop", { offset: .13, "stop-color": "#91b7d8", "stop-opacity": .36 }),
+    svg("stop", { offset: .55, "stop-color": "#5681a6", "stop-opacity": .21 }),
+    svg("stop", { offset: 1, "stop-color": "#8bafd1", "stop-opacity": .13 }));
+  const defs = svg("defs");
+  defs.append(area, beam, edge);
+  root.append(defs);
+
+  const number = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
+  for (let i = 0; i <= 4; i++) {
+    const v = max * i / 4, yy = y(v);
+    root.append(svg("path", { d: `M${left},${yy}H${right}`, class: "traffic-grid" }),
+      svg("path", { d: `M${left},${yy + 2}H${right}`, class: "traffic-grid-depth" }),
+      svg("text", { x: left - 8, y: yy + 3, "text-anchor": "end", class: "traffic-copy" }, number.format(v)));
+  }
+  for (let i = 0; i <= 3; i++) {
+    const ts = start + (trafficWindow * i / 3);
+    const ago = end - ts;
+    const label = ago === 0 ? "Latest" : ago >= 60 ? `${Math.round(ago / 60)}m ago` : `${Math.round(ago)}s ago`;
+    root.append(svg("text", { x: x(ts), y: h - 5, class: "traffic-copy",
+      "text-anchor": i === 0 ? "start" : i === 3 ? "end" : "middle" }, label));
+  }
+  // A gap in telemetry breaks the trace instead of implying that intervening samples were collected.
+  const runs = [];
+  for (const point of samples) {
+    if (!runs.length || point[0] - runs.at(-1).at(-1)[0] > 4) runs.push([]);
+    runs.at(-1).push(point);
+  }
+  for (const run of runs) {
+    const line = run.map(([ts, val], index) => `${index ? "L" : "M"}${x(ts).toFixed(1)},${y(val).toFixed(1)}`).join("");
+    if (run.length > 1) root.append(svg("path", { d: `${line}L${x(run.at(-1)[0])},${bottom}H${x(run[0][0])}Z`, fill: "url(#traffic-fill)" }),
+      svg("path", { d: line, class: "traffic-glow" }),
+      svg("path", { d: line, class: "traffic-line" }));
+    else root.append(svg("circle", { cx: x(run[0][0]), cy: y(run[0][1]), r: 3, class: "traffic-point" }));
+  }
+
+  const recent = observedIncidents().map((inc) => inc.alarms[0]).filter((alarm) => alarm.ts >= start && alarm.ts <= end);
+  for (const alarm of recent) {
+    const xx = x(alarm.ts);
+    const dot = svg("circle", { cx: xx, cy: bottom - 5, r: 3.3, class: "traffic-alarm" });
+    dot.append(svg("title", {}, `${alertTitle(alarm)} · ${clock(alarm.ts)}`));
+    root.append(svg("line", { x1: xx, x2: xx, y1: top, y2: bottom - 5, class: "traffic-alarm-line" }), dot);
+  }
+  box.replaceChildren(root);
+  $("traffic-rate").textContent = S.rate == null ? "–" : fmt(S.rate);
+  $("traffic-peak").textContent = samples.length ? `Peak ${fmt(peak)} rows/min` : "Waiting for read samples";
+  $("traffic-marker-key").hidden = !recent.length;
+}
+
+function drawAlertCharts(list) {
+  if ($("overview").hidden) return;
+  const key = JSON.stringify(list.map((inc) => [inc.id, inc.severity, inc.firstHold?.ts, inc.dismissed]));
+  if (key === alertChartKey) return;
+  alertChartKey = key;
+  const counts = { critical: 0, high: 0, low: 0 };
+  for (const inc of list) if (inc.severity in counts) counts[inc.severity]++;
+  const labels = Object.entries(counts).flatMap(([severity, count]) => {
+    const dt = el("dt", "", cap(severity));
+    const value = el("span", "severity-value", fmt(count));
+    const bar = el("span", `severity-bar ${severity}`);
+    bar.setAttribute("aria-hidden", "true");
+    bar.style.setProperty("--fraction", `${list.length ? 100 * count / list.length : 0}%`);
+    const track = el("span", "severity-track");
+    track.append(bar);
+    const dd = el("dd");
+    dd.append(track, value);
+    return [dt, dd];
+  });
+  $("severity-chart").replaceChildren(...labels);
+
+  const recent = [...list].sort((a, b) => b.alarms[0].ts - a.alarms[0].ts).slice(0, 5);
+  const durations = recent.map((inc) => inc.firstHold ? Math.max(0, inc.firstHold.ts - inc.alarms[0].ts) : null);
+  const max = Math.max(.001, ...durations);
+  const rows = recent.map((inc, i) => {
+    const row = el("li");
+    const link = el("a", "containment-link", alertTitle(inc.alarms[0]));
+    link.href = `#alerts/${inc.id}`;
+    link.title = `View ${inc.id}`;
+    const elapsed = durations[i];
+    const value = el("span", "containment-value", elapsed == null
+      ? (inc.dismissed ? "Dismissed" : "Open") : dur(elapsed, true));
+    row.append(link, value);
+    if (elapsed != null) {
+      const track = el("span", "containment-track");
+      const bar = el("span", "containment-bar");
+      track.setAttribute("aria-hidden", "true");
+      bar.style.setProperty("--fraction", `${100 * elapsed / max}%`);
+      track.append(bar);
+      row.append(track);
+    }
+    return row;
+  });
+  $("containment-empty").hidden = Boolean(rows.length);
+  $("containment-chart").replaceChildren(...rows);
+}
+
 // drawing, batched so a burst of events paints once
 
 const pending = new Set();
@@ -423,6 +579,7 @@ function flush() {
     incidents: drawIncidents, score: drawScore, prints: drawPrints, phone: drawPhone,
   };
   for (const p of ALL) if (parts.has(p)) draw[p]();
+  if (parts.has("chart") || parts.has("incidents")) drawTraffic();
 }
 
 function drawStatus() {
@@ -797,9 +954,15 @@ function alertRow(inc, active) {
 }
 
 function drawIncidents() {
-  const list = [...S.incidents.values()].filter((inc) => inc.alarms.length);
+  const list = observedIncidents();
   const open = (inc) => Number(stateOf(inc) === "Open");
   list.sort((a, b) => open(b) - open(a) || b.alarms.at(-1).ts - a.alarms.at(-1).ts);
+  const requestedAlert = location.hash.match(/^#alerts\/(inc-\d+)$/)?.[1];
+  if (requestedAlert && !customSelection && list.some((inc) => inc.id === requestedAlert)) {
+    selectedAlert = requestedAlert;
+    customSelection = true;
+    $("main").dataset.detail = "true";
+  }
   if (!customSelection) selectedAlert = list[0]?.id ?? null;
   const inc = S.incidents.get(selectedAlert);
   const rows = list.map((item) => alertRow(item, item.id === selectedAlert));
@@ -810,7 +973,12 @@ function drawIncidents() {
     if (listElement.contains(focus)) focus.focus({ preventScroll: true });
   }
   $("main").dataset.hasAlerts = String(Boolean(inc));
-  $("alert-count").textContent = list.length ? `Lakeview Fiber · ${list.filter(open).length} open` : "Lakeview Fiber";
+  const openCount = list.filter(open).length;
+  $("alert-count").textContent = list.length ? `Lakeview Fiber · ${openCount} open` : "Lakeview Fiber";
+  const counter = $("nav-alert-count");
+  counter.hidden = !openCount;
+  counter.textContent = fmt(openCount);
+  drawAlertCharts(list);
   $("incident").hidden = !inc;
   $("empty-alert").hidden = Boolean(inc);
   if (!inc) return drawStatus();
@@ -1334,7 +1502,7 @@ function drawPrints() {
 const CONN = { connecting: "Connecting", live: "Live", retry: "Reconnecting", down: "Not connected", replay: "Replay" };
 
 function setConn(state) {
-  for (const id of ["conn", "mobile-conn"]) {
+  for (const id of ["conn", "mobile-conn", "overview-conn"]) {
     const indicator = $(id);
     indicator.dataset.state = state;
     indicator.textContent = CONN[state];
@@ -1449,6 +1617,7 @@ $("show-tools").addEventListener("click", () => {
 tools.addEventListener("close", () => $("app-menu").querySelector("summary").focus());
 $("back-to-alerts").addEventListener("click", () => {
   $("main").dataset.detail = "false";
+  if (location.hash.startsWith("#alerts/")) history.replaceState(null, "", "#alerts");
   alertRows.get(selectedAlert)?.firstChild.focus();
 });
 $("alert-list").addEventListener("keydown", (event) => {
@@ -1491,9 +1660,26 @@ const ro = new ResizeObserver(() => {
     layoutMine();
     drawChart();
     drawDrive();
+    drawTraffic();
   }, 60);
 });
-for (const id of ["mine", "chart", "drive"]) ro.observe($(id));
+for (const id of ["mine", "chart", "drive", "traffic-chart"]) ro.observe($(id));
+updateView();
+window.addEventListener("hashchange", updateView);
+if (REPLAY) {
+  document.body.dataset.replay = "true";
+  $("launch-watch").href = "#activity";
+  $("launch-watch").firstChild.textContent = "View replay activity";
+}
+for (const control of document.querySelectorAll("[data-range]")) {
+  control.addEventListener("click", () => {
+    trafficWindow = Number(control.dataset.range);
+    for (const button of control.parentElement.children) {
+      button.setAttribute("aria-pressed", String(button === control));
+    }
+    drawTraffic();
+  });
+}
 dirty(...ALL);
 if (REPLAY) replay();
 else live();
