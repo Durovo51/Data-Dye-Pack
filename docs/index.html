@@ -3,75 +3,236 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Set up Data Dyepack, run an attack drill, and learn how the lab detects and contains suspicious access.">
-  <meta name="theme-color" content="#0b1015">
-  <title>Data Dyepack Documentation</title>
+  <meta name="description" content="Data Dyepack detects suspicious access with canary records, decoy files, and machine-speed read alarms. Explore the MadHacks demo and run the lab locally.">
+  <meta name="theme-color" content="#050608">
+  <title>Data Dyepack</title>
   <link rel="stylesheet" href="site.css">
+  <link rel="stylesheet" href="home.css">
   <script src="demo.js" defer></script>
 </head>
 <body class="home">
   <a class="skip" href="#main">Skip to content</a>
-  <header class="topbar">
+  <header class="topbar product-bar">
     <div class="wrap nav">
       <a class="brand" href="./">Data Dyepack</a>
       <nav aria-label="Main navigation">
-        <a href="guide.html">User guide</a>
-        <a href="https://github.com/Durovo51/Data-Dye-Pack">GitHub <span aria-hidden="true">↗</span></a>
+        <a href="#demo">Demo</a>
+        <a href="#how-it-works">How it works</a>
+        <a href="#results">Results</a>
+        <a class="docs-link" href="guide.html">Docs</a>
       </nav>
     </div>
   </header>
+
   <main id="main">
-    <section class="hero" aria-labelledby="hero-title">
+    <section class="hero product-hero" aria-labelledby="hero-title">
       <div class="wrap hero-copy">
-        <p class="eyebrow">Documentation</p>
+        <p class="product-name">Data Dyepack</p>
         <h1 id="hero-title">Contained on contact.</h1>
-        <p class="hero-summary">See how Data Dyepack detects suspicious access, locks customer files in place, and helps trace a leaked copy.</p>
+        <p class="hero-summary">An agent opens a decoy. Dyepack locks customer files in place and gives the team a trail to follow.</p>
         <div class="hero-actions">
-          <a class="primary" href="guide.html#start-the-lab">Set up the lab <span aria-hidden="true">→</span></a>
-          <a class="secondary" href="guide.html#see-a-complete-incident">Run a drill <span aria-hidden="true">→</span></a>
+          <a class="primary" href="#demo">Watch the demo <span aria-hidden="true">↓</span></a>
+          <a class="secondary" href="#get-started">Run the lab <span aria-hidden="true">→</span></a>
         </div>
       </div>
-      <img class="signal" src="signal.jpg" width="1900" height="633" alt="">
+      <img class="signal" src="signal.jpg" width="1900" height="633" alt="" fetchpriority="high">
     </section>
-    <section class="wrap demo" aria-labelledby="demo-title">
-      <div class="demo-heading">
-        <h2 id="demo-title">See Data Dyepack in action</h2>
-        <a href="https://youtu.be/5LePHZaZZ3o">Watch on YouTube <span aria-hidden="true">↗</span></a>
+
+    <section class="chapter demo-chapter" id="demo" aria-labelledby="demo-title">
+      <div class="wrap">
+        <div class="chapter-header demo-heading">
+          <h2 id="demo-title">Watch it happen.</h2>
+          <a class="text-link" href="https://youtu.be/5LePHZaZZ3o">Watch on YouTube <span aria-hidden="true">↗</span></a>
+        </div>
+        <iframe id="project-video"
+          src="https://www.youtube.com/embed/5LePHZaZZ3o?enablejsapi=1&amp;playsinline=1&amp;rel=0&amp;origin=https%3A%2F%2Fdurovo51.github.io"
+          title="Data Dyepack project demo"
+          loading="lazy"
+          referrerpolicy="strict-origin-when-cross-origin"
+          allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+          allowfullscreen></iframe>
       </div>
-      <iframe id="project-video"
-        src="https://www.youtube.com/embed/5LePHZaZZ3o?enablejsapi=1&amp;playsinline=1&amp;rel=0&amp;origin=https%3A%2F%2Fdurovo51.github.io"
-        title="Data Dyepack project demo"
-        loading="lazy"
-        referrerpolicy="strict-origin-when-cross-origin"
-        allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
-        allowfullscreen></iframe>
     </section>
-    <section class="wrap topics" aria-labelledby="topics-title">
-      <h2 id="topics-title">Using Data Dyepack</h2>
-      <div class="topics-grid">
-        <a class="topic" href="guide.html#start-the-lab">
-          <h3>Install and configure <span aria-hidden="true">↗</span></h3>
-          <p>Build the sample customer database, plant canaries, and open the dashboard.</p>
-        </a>
-        <a class="topic" href="guide.html#see-a-complete-incident">
-          <h3>Test a detection <span aria-hidden="true">↗</span></h3>
-          <p>Watch the recording or trigger a decoy in the local lab.</p>
-        </a>
-        <a class="topic" href="guide.html#investigate-and-respond">
-          <h3>Investigate an alert <span aria-hidden="true">↗</span></h3>
-          <p>Read the timeline, check exposure, and use the response controls.</p>
-        </a>
-        <a class="topic" href="guide.html#export-lock-and-recover-files">
-          <h3>Restore locked files <span aria-hidden="true">↗</span></h3>
-          <p>Open a honey-locked export or recover the original files after a drill.</p>
-        </a>
+
+    <section class="chapter mechanism" id="how-it-works" aria-labelledby="mechanism-title">
+      <div class="wrap">
+        <div class="chapter-header">
+          <p class="chapter-label">How it works</p>
+          <h2 id="mechanism-title">The data raises the alarm.</h2>
+          <p>When an AI agent with a stolen login sweeps through customer records, a decoy file or planted identity can reveal what it touched. The Lakeview Fiber lab shows how those signals work together.</p>
+        </div>
+
+        <article class="lock-panel" aria-labelledby="lock-title">
+          <div class="lock-copy">
+            <h3 id="lock-title">Lock in place.</h3>
+            <p>Reading a decoy on the local drive triggers a lock across eligible customer files. The originals are replaced by <code>.dye</code> files, and apps see that the plaintext file is gone. Run <code>dyepack unlock</code> to restore the bytes.</p>
+          </div>
+          <div class="file-change" role="img" aria-label="customers.csv becomes customers.csv.dye">
+            <code aria-hidden="true">customers.csv</code>
+            <span aria-hidden="true">↓</span>
+            <code aria-hidden="true">customers.csv<strong>.dye</strong></code>
+          </div>
+        </article>
+
+        <dl class="feature-list">
+          <div>
+            <dt>Canary customers</dt>
+            <dd>Planted customers blend into the table and live on a separate watch list. A canary login or contact attempt can raise an alert later and identify the export that carried it.</dd>
+          </div>
+          <div>
+            <dt>Decoy files</dt>
+            <dd>A full customer export and an unencrypted backup make tempting targets. A legitimate workflow has no reason to read them.</dd>
+          </div>
+          <div>
+            <dt>Honey encryption</dt>
+            <dd>A wrong password can open a plausible synthetic customer list. The correct password reveals the export’s original rows and its planted canaries.</dd>
+          </div>
+          <div>
+            <dt>Speed alarm</dt>
+            <dd>Reads above 600 rows per minute flag machine-speed access. Dyepack counts by session, login, and address so reconnecting carries the activity forward.</dd>
+          </div>
+          <div>
+            <dt>Live dashboard</dt>
+            <dd>See read speed, time to containment, exposure, and incident reports. The lab can route alerts to a phone and prepare breach-notice details for review.</dd>
+          </div>
+        </dl>
       </div>
-      <div class="reference">
-        <a href="guide.html#command-reference">Command reference <span aria-hidden="true">→</span></a>
-        <a href="guide.html#lab-http-api">Lab HTTP API <span aria-hidden="true">→</span></a>
+    </section>
+
+    <section class="chapter results" id="results" aria-labelledby="results-title">
+      <div class="wrap">
+        <div class="chapter-header">
+          <p class="chapter-label">Measured in the lab</p>
+          <h2 id="results-title">Half a second to lock the drive.</h2>
+          <p>The demo measures detection separately from containment. The agent tripped a decoy in a few hundredths of a second, then Dyepack locked the eligible files in place.</p>
+        </div>
+        <dl class="lab-metrics">
+          <div><dt><span>0</span></dt><dd>alarms during routine support work</dd></div>
+          <div><dt><span>~200</span></dt><dd>rows read before a stolen login was locked in under one second</dd></div>
+          <div><dt><span>50/50</span></dt><dd>wrong passwords that produced plausible lists</dd></div>
+        </dl>
+        <p class="result-note">In the recorded trial, the served model missed the real list among five candidates. A later canary login identified the exact export it came from.</p>
+      </div>
+    </section>
+
+    <section class="chapter setup" id="get-started" aria-labelledby="setup-title">
+      <div class="wrap">
+        <div class="chapter-header">
+          <p class="chapter-label">Get started</p>
+          <h2 id="setup-title">Run it on your machine.</h2>
+          <p>Use Python 3.10 or newer. The lab runs on the standard library. All customer data is generated for the demo.</p>
+        </div>
+        <div class="setup-grid">
+          <div class="setup-step">
+            <h3>Set up Lakeview Fiber</h3>
+            <pre><code>git clone https://github.com/Durovo51/Data-Dye-Pack.git &amp;&amp;
+cd Data-Dye-Pack &amp;&amp;
+([ -f .env ] || cp .env.example .env)</code></pre>
+            <p>Set <code>DYEPACK_LOCK_PASSWORD</code> in <code>.env</code> before building the drive. For the shorter <code>dyepack</code> command, use an editable install with <code>python3 -m pip install -e .</code></p>
+            <pre><code>python3 -m dyepack lab &amp;&amp;
+python3 -m dyepack seed &amp;&amp;
+python3 -m dyepack drive &amp;&amp;
+python3 -m dyepack serve --open</code></pre>
+          </div>
+          <div class="setup-step">
+            <h3>Run a drill</h3>
+            <p>In another terminal at the repo root, try normal support activity, the stolen-login scenario, or the agent scenario.</p>
+            <pre><code>python3 -m dyepack drill normal
+python3 -m dyepack drill heist
+python3 -m dyepack drill agent --simulate-sentinel</code></pre>
+            <p>For live file reads, add the sentinel and run the agent drill without simulation. On Linux, use <code>python3 -m dyepack sentinel</code>. On macOS, give your terminal Full Disk Access and use <code>sudo python3 -m dyepack sentinel</code>.</p>
+            <p>Restore the lab files afterwards with <code>python3 -m dyepack unlock</code>.</p>
+          </div>
+        </div>
+        <nav class="resource-links" aria-label="Lab guides">
+          <a href="guide.html#start-the-lab">Full user guide <span aria-hidden="true">→</span></a>
+          <a href="https://github.com/Durovo51/Data-Dye-Pack/blob/main/docs/linux.md">Linux server guide <span aria-hidden="true">↗</span></a>
+          <a href="guide.html#command-reference">Command reference <span aria-hidden="true">→</span></a>
+          <a href="guide.html#lab-http-api">Lab HTTP API <span aria-hidden="true">→</span></a>
+        </nav>
+      </div>
+    </section>
+
+    <section class="chapter integrations" aria-labelledby="integrations-title">
+      <div class="wrap integration-grid">
+        <div class="chapter-header">
+          <p class="chapter-label">Databricks integration</p>
+          <h2 id="integrations-title">From alert to report.</h2>
+          <p>A served Databricks chat model can write incident reports and triage. Delta tables hold the alert history for dashboards and Genie questions. With no Databricks credentials configured, the lab uses local report templates.</p>
+          <a class="text-link" href="guide.html#notifications-and-reports">Configure reports and notifications <span aria-hidden="true">→</span></a>
+        </div>
+        <div class="integration-config">
+          <h3>Databricks settings in <code>.env</code></h3>
+          <ul>
+            <li><code>DATABRICKS_HOST</code></li>
+            <li><code>DATABRICKS_WAREHOUSE_ID</code></li>
+            <li><code>DATABRICKS_MODEL</code></li>
+            <li><code>DATABRICKS_TOKEN</code></li>
+          </ul>
+        </div>
+        <div class="built-with">
+          <h3>Built with</h3>
+          <p>Python 3.10+, Databricks Model Serving, Delta and Genie, SQLite customer tables, CSV and JSON files, Linux <code>inotify</code> and <code>auditd</code>, and the macOS system event stream.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="chapter boundaries" aria-labelledby="boundaries-title">
+      <div class="wrap">
+        <div class="chapter-header">
+          <h2 id="boundaries-title">Lab limits and roadmap.</h2>
+          <p>The project runs as a single-machine hackathon lab. Here’s what would need to change for production.</p>
+        </div>
+        <div class="limits-list">
+          <details>
+            <summary>Company-owned canary endpoints</summary>
+            <p>The lab uses synthetic customers. A deployment would use company-controlled canary email addresses and phone numbers to receive contact attempts.</p>
+          </details>
+          <details>
+            <summary>External key management and dual control</summary>
+            <p>The lab gets its lock password from <code>.env</code>. A production deployment would keep the secret in a separate key manager and require two people to authorize an unlock.</p>
+          </details>
+          <details>
+            <summary>Population models for honey encryption</summary>
+            <p>The plausibility of a fake list depends on how well its distribution matches the population. A production header would draw from an independent population model to avoid giving away patterns in the protected data.</p>
+          </details>
+          <details>
+            <summary>File support and process matching</summary>
+            <p>Lock in place currently targets eligible customer-shaped CSV and JSON files. SQLite holds the lab database. Linux <code>inotify</code> reports file activity without process names. Process matching is available on macOS or through the Linux <code>auditd</code> bridge.</p>
+          </details>
+          <details>
+            <summary>Exposure before containment</summary>
+            <p>Records returned before lockout can already be exposed. Dyepack reports activity it observed and can identify a stolen export when a planted identity is used.</p>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <section class="chapter team" aria-labelledby="team-title">
+      <div class="wrap">
+        <div class="chapter-header">
+          <h2 id="team-title">The team behind Dyepack.</h2>
+          <p>Built for the MadHacks 2026 TDS Privacy and Security Challenge.</p>
+        </div>
+        <ul class="team-list">
+          <li><h3>Jake Bryant</h3><p><a href="https://github.com/Durovo51">GitHub</a> · <a href="https://www.linkedin.com/in/jake-bryant-079484330/">LinkedIn</a></p></li>
+          <li><h3>Anand Indukuri</h3><p><a href="https://github.com/anandindukuri-hub">GitHub</a> · <a href="https://www.linkedin.com/in/anandindukuri/">LinkedIn</a></p></li>
+          <li><h3>Mark Oskin</h3><p><a href="https://github.com/moskin-cpu">GitHub</a> · <a href="https://www.linkedin.com/in/mark-oskin-33aa20303/">LinkedIn</a></p></li>
+        </ul>
+        <p class="acknowledgments">Thanks to Databricks, Best-README-Template, and Img Shields. <a href="https://github.com/Durovo51/Data-Dye-Pack#acknowledgments">Project credits <span aria-hidden="true">↗</span></a></p>
       </div>
     </section>
   </main>
-  <footer class="footer"><div class="wrap"><span>Data Dyepack</span><a href="https://github.com/Durovo51/Data-Dye-Pack">View the source on GitHub <span aria-hidden="true">↗</span></a></div></footer>
+
+  <footer class="footer product-footer">
+    <div class="wrap">
+      <a class="footer-brand" href="./">Data Dyepack</a>
+      <nav aria-label="Project on GitHub">
+        <a href="https://github.com/Durovo51/Data-Dye-Pack">Source and README</a>
+        <a href="https://github.com/Durovo51/Data-Dye-Pack/issues">Report an issue</a>
+        <a href="https://github.com/Durovo51/Data-Dye-Pack/blob/main/LICENSE">MIT License</a>
+      </nav>
+    </div>
+  </footer>
 </body>
 </html>
