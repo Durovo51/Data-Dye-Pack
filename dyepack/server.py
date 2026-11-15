@@ -165,7 +165,7 @@ class App:
         batch = (self.trip.canaries.get(who) or {}).get("batch")
         where = {"table": "the customer table", "drive": "a decoy file on the drive"}.get(batch, f"export {batch}")
         if reason == "canary_login":
-            return f"Canary customer {who} tried at the login page. It only exists in {where}."
+            return f"Someone tried to log in as canary customer {who}. It only exists in {where}."
         return f"Someone outside contacted canary customer {who}. It only exists in {where}."
 
     def _alert(self, iid, alarm, severity=None):
@@ -607,7 +607,7 @@ def banner(app, port):
     routes = "  ".join(f"{sev}: {', '.join(ch) or 'dashboard only'}" for sev, ch in app.routes.items())
     return [
         f"Data Dyepack is watching Lakeview Fiber at http://127.0.0.1:{port}/",
-        f"  mine map          http://127.0.0.1:{port}/  (serve --open opens it with the control token)",
+        f"  dashboard         http://127.0.0.1:{port}/  (serve --open opens it with the control token)",
         f"  control token     in {schema.DATA_DIR / 'control_token'}, owner only and never printed",
         f"  canaries watched  {len(watched):,} ({', '.join(f'{n:,} {k}' for k, n in batches.items())})",
         f"  decoy files       {len(app.trip.decoys)}",

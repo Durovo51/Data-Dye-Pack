@@ -18,6 +18,16 @@ Run every command from this folder as `python3 -m dyepack ...`. For a shorter `d
 command, install the package with `pip install -e .` (inside a virtual environment if your
 system Python blocks it).
 
+## Set the lock password
+
+```bash
+cp .env.example .env && chmod 600 .env
+```
+
+Open `.env` and set `DYEPACK_LOCK_PASSWORD` to a password only you know. Dyepack uses it to
+lock the drive when a decoy is read and to unlock it afterwards. Set it before the next step,
+because the drive's nightly backup is locked with it too.
+
 ## Set up the lab
 
 ```bash
@@ -27,15 +37,6 @@ python3 -m dyepack lab && python3 -m dyepack seed && python3 -m dyepack drive
 `lab` builds a table of 50,000 made up customers, `seed` plants canary customers in it and
 `drive` writes a company drive with decoy files at `~/LakeviewFiber`. Set the `DYEPACK_DRIVE`
 environment variable to put the drive somewhere else.
-
-## Set the lock password
-
-```bash
-cp .env.example .env && chmod 600 .env
-```
-
-Open `.env` and set `DYEPACK_LOCK_PASSWORD` to a password only you know. Dyepack uses it to
-lock the drive when a decoy is read and to unlock it afterwards.
 
 ## Run it
 

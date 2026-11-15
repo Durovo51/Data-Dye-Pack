@@ -303,7 +303,7 @@ dialog::backdrop { background: rgb(0 0 0 / 20%); }
 .print, .note { min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--ground); overflow-wrap: anywhere; }
 .note.new { animation: drop .24s ease-out; }
 @keyframes drop { from { opacity: 0; transform: translateY(-5px); } }
-.print-top { justify-content: space-between; }
+.print-top, .note-top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .print p { margin: 5px 0 0; font-size: 13px; }
 .print.leaked { border-color: #f4ced8; }
 .print .trace { color: #9f2940; font-weight: 650; }

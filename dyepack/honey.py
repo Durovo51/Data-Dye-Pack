@@ -63,20 +63,14 @@ def cmd_lock(args):
             con.close()
     except sqlite3.Error as e:
         return _fail(f"can't read the customers table: {e}")
-    profile = None
-    if schema.PROFILE_PATH.exists():
-        try:
-            profile = json.loads(schema.PROFILE_PATH.read_text())
-        except ValueError:
-            return _fail(f"{schema.PROFILE_PATH} is damaged, run dyepack seed on a fresh lab")
-    else:
-        print("no profile yet, fakes will use the default weights", file=sys.stderr)
     password = _password(args, confirm=True)
     if not password:
         return _fail("the password can't be empty")
     _rng.shuffle(rows)  # leave no order for a thief to read
     try:
-        blob = lock(rows, password, profile)
+        # the lab's rows come from the recipe's own weights, so the lock uses those too (profile None),
+        # like exports and the drive. a header built from this table's counts fits the real list best
+        blob = lock(rows, password, None)
     except ValueError as e:
         return _fail(str(e))
     out = Path(args.out)

@@ -35,7 +35,7 @@ const ACTIONS = {
   notify_customers: ["Prepare breach notice", "Notice details ready", "Prepared breach notice details"],
   dismiss: ["Dismiss incident", "Dismissed", "Dismissed the incident", "Mark the incident as a false alarm and release its session or address locks."],
 };
-// the demo drive from drive.py (no route lists it yet). decoys sort first in their folders
+// the lab drive from drive.py (no route lists it yet). decoys sort first in their folders
 // like they do on disk. other files show up once they get opened
 const DRIVE = [
   ["customers", ["all_customers_full_export_2026.csv", "customers.csv"]],
@@ -197,8 +197,10 @@ function driveFile(name, file) {
 
 function incident(id = "unknown") {
   if (!S.incidents.has(id)) {
+    // sessions: everyone the incident touched. own: only the ones that set off an alarm. a session that was
+    // just locked along with them (the real rep at their desk) doesn't count toward exposure or time to catch
     S.incidents.set(id, {
-      id, alarms: [], activity: [], sessions: new Set(), severity: "info", alarmAt: null, last: null,
+      id, alarms: [], activity: [], sessions: new Set(), own: new Set(), severity: "info", alarmAt: null, last: null,
       heldAt: null, firstHold: null, locked: false, seals: [], notes: [], actions: new Set(),
       report: null, dismissed: false,
     });
@@ -269,7 +271,10 @@ function fileRead(e, d) {
 function alarm(e, d) {
   const inc = incident(d.incident);
   inc.alarms.push(e);
-  if (e.session) inc.sessions.add(e.session);
+  if (e.session) {
+    inc.sessions.add(e.session);
+    inc.own.add(e.session);
+  }
   if ((RANK[e.severity] ?? 0) > (RANK[inc.severity] ?? 0)) inc.severity = e.severity;
   if (d.reason === "decoy_open") {
     // remember which file it was, the reader moves on
@@ -512,14 +517,16 @@ function drawTraffic() {
     root.append(svg("line", { x1: xx, x2: xx, y1: top, y2: bottom - 5, class: "traffic-alarm-line" }), dot);
   }
   box.replaceChildren(root);
-  $("traffic-rate").textContent = S.rate == null ? "–" : fmt(S.rate);
+  $("traffic-rate").textContent = S.rate == null ? "-" : fmt(S.rate);
   $("traffic-peak").textContent = samples.length ? `Peak ${fmt(peak)} rows/min` : "Waiting for read samples";
   $("traffic-marker-key").hidden = !recent.length;
 }
 
 function drawAlertCharts(list) {
   if ($("overview").hidden) return;
-  const key = JSON.stringify(list.map((inc) => [inc.id, inc.severity, inc.firstHold?.ts, inc.dismissed]));
+  // an incident goes by its latest serious alarm here, the same name the Alerts list gives it
+  const headline = (inc) => inc.last || inc.alarms[0];
+  const key = JSON.stringify(list.map((inc) => [inc.id, inc.severity, inc.firstHold?.ts, inc.dismissed, headline(inc).detail?.reason]));
   if (key === alertChartKey) return;
   alertChartKey = key;
   const counts = { critical: 0, high: 0, low: 0 };
@@ -543,7 +550,7 @@ function drawAlertCharts(list) {
   const max = Math.max(.001, ...durations);
   const rows = recent.map((inc, i) => {
     const row = el("li");
-    const link = el("a", "containment-link", alertTitle(inc.alarms[0]));
+    const link = el("a", "containment-link", alertTitle(headline(inc)));
     link.href = `#alerts/${inc.id}`;
     link.title = `View ${inc.id}`;
     const elapsed = durations[i];
@@ -599,7 +606,7 @@ function drawStatus() {
 
 function drawChart() {
   const rate = $("rate");
-  rate.textContent = S.rate == null ? "–" : fmt(S.rate);
+  rate.textContent = S.rate == null ? "-" : fmt(S.rate);
   rate.classList.toggle("over", S.rate > SPEED_ROWS_PER_MIN);
   const box = $("chart");
   const w = box.clientWidth, h = box.clientHeight;
@@ -1029,7 +1036,8 @@ function activityItem(e) {
     label = `${CHANNELS[d.channel] || d.channel} · ${d.status}`;
     meta = d.summary;
   } else if (e.type === "burst") {
-    label = `Locked ${fmt(d.files?.length || 0)} files in ${fileName(d.folder)}`;
+    const n = d.files?.length || 0;
+    label = `Locked ${fmt(n)} ${n === 1 ? "file" : "files"} in ${fileName(d.folder)}`;
     meta = d.files?.join(", ");
   }
   const time = el("time", "", clock(e.ts));
@@ -1084,7 +1092,7 @@ function happened(inc) {
     if (r === "canary_touch") {
       // every canary read counts, not just the ones an alarm listed
       let k = 0;
-      for (const sid of inc.sessions) k += S.sessions.get(sid)?.canaries || 0;
+      for (const sid of inc.own) k += S.sessions.get(sid)?.canaries || 0;
       k = Math.max(k, list.reduce((sum, a) => sum + (a.detail.canary_count ?? a.detail.canary_ids?.length ?? 0), 0)) || n;
       return `touched ${count(k, "a canary customer", "canary customers")}`;
     }
@@ -1127,21 +1135,22 @@ function dateText(v) {
 }
 
 function howFast(inc, first) {
-  const starts = [...inc.sessions].map((s) => S.firstRead.get(s) ?? S.first.get(s)).filter((t) => t != null);
+  const starts = [...inc.own].map((s) => S.firstRead.get(s) ?? S.first.get(s)).filter((t) => t != null);
   const start = starts.length ? Math.min(...starts) : first.ts;
   // an incident a drill step timed uses that step's number, same as the scoreboard
   const step = Object.keys(S.timed).find((p) => S.timed[p].inc === inc.id);
   const drilled = step ? stepTime(step) : null;
   let out = `Caught in ${drilled != null ? dur(drilled, false, true) : dur(first.ts - start)}`;
   if (inc.seals[0]) out += `, files locked ${later(inc.seals[0].ts - first.ts)}`;
-  if (inc.firstHold) out += `, ${inc.firstHold.type === "lock" ? "locked" : "contained"} ${later(inc.firstHold.ts - first.ts)}`;
+  // when the file lock was the first hold, the line above already said so
+  if (inc.firstHold && inc.firstHold.type !== "burst") out += `, ${inc.firstHold.type === "lock" ? "locked" : "contained"} ${later(inc.firstHold.ts - first.ts)}`;
   return `${out}.`;
 }
 
 function exposure(inc) {
   let rows = null, drive = false;
   const files = new Set();
-  for (const sid of inc.sessions) {
+  for (const sid of inc.own) {
     const s = S.sessions.get(sid);
     if (s) rows = (rows || 0) + Math.max(0, s.rows - s.canaries);
     const p = S.procs.get(sid);
@@ -1153,7 +1162,7 @@ function exposure(inc) {
   }
   const out = [];
   if (rows != null) out.push(`${fmt(rows)} real customer ${rows === 1 ? "row" : "rows"}${inc.locked ? " before the lock" : " so far"}`);
-  for (const sid of inc.sessions) {
+  for (const sid of inc.own) {
     for (const c of S.copies.get(sid) || []) out.push(`${fmt(c.real)} real customer rows in honey locked export ${c.id}`);
   }
   if (drive && files.size) out.push(`${files.size} real customer ${files.size === 1 ? "file" : "files"}: ${[...files].join(", ")}`);
@@ -1196,7 +1205,7 @@ function drawActions(inc) {
   const note = $("response-note");
   note.hidden = !options.length || Boolean(canEdit);
   note.textContent = controlToken ? "Response controls will be available when the live connection returns."
-    : "Read only. Open the server’s control link to respond.";
+    : "Read only. Open this page with dyepack serve --open to respond.";
   for (const button of $("action-items").children) {
     const action = button.dataset.action;
     button.hidden = !options.includes(action);
@@ -1239,7 +1248,7 @@ function post(path, body) {
   return fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
 }
 
-const TOKEN_HELP = "Open the control link printed by dyepack serve to make live changes.";
+const TOKEN_HELP = "Open this page with dyepack serve --open to make live changes.";
 
 async function actionResult(response) {
   if (response.status === 401) {
@@ -1266,7 +1275,7 @@ async function act(id, action) {
     const exportId = inc.alarms.find((a) => a.detail?.export_id)?.detail.export_id;
     const copy = S.exports.get(exportId);
     if (action === "notify_customers") {
-      detail.plaintext_rows = [...inc.sessions].reduce((sum, sid) => {
+      detail.plaintext_rows = [...inc.own].reduce((sum, sid) => {
         const s = S.sessions.get(sid);
         return sum + (s ? Math.max(0, s.rows - s.canaries) : 0);
       }, 0);
@@ -1317,7 +1326,7 @@ function noteCard(e) {
   const sev = RANK[e.severity] > 0 ? e.severity : inc?.severity || "high";
   const li = el("li", `note ${d.channel} ${d.status}`);
   const top = el("div", "note-top");
-  top.append(el("span", "app", { push: "Dyepack", sms: "Messages", email: "Mail", discord: "Discord" }[d.channel] || d.channel), el("time", "", clock(e.ts)));
+  top.append(el("span", "note-app", { push: "Dyepack", sms: "Messages", email: "Mail", discord: "Discord" }[d.channel] || d.channel), el("time", "", clock(e.ts)));
   const body = d.summary || (a ? `${what(a)} · ${who(a)}.${seal ? ` Files in ${seal.folder}/ locked in place.` : ""}` : "Open the dashboard for details.");
   li.append(
     top,

@@ -1,4 +1,4 @@
-"""Lakeview Fiber's company drive for the demo: real customer files, decoys that no real
+"""Lakeview Fiber's company drive for the lab: real customer files, decoys that no real
 workflow opens and a honey locked backup. It lives outside the repo, so it never gets committed.
 """
 

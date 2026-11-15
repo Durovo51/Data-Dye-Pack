@@ -54,7 +54,7 @@ def prove(rows, profile, fakes=99, password=None, naive=False):
     """Lock rows, open them with `fakes` random wrong passwords and score all the lists.
     Returns the real list's rank on each check, 1 being the lowest score of the lot.
     If the real list blends in, every rank is as likely as any other. naive=True locks
-    with exact counts in the header instead, for the side by side demo."""
+    with exact counts in the header instead, for the side by side comparison."""
     if fakes < 1:
         raise ValueError("needs at least one wrong password")
     if not rows:
@@ -99,7 +99,7 @@ def _opened(blob, passwords):
 
 
 def _naive_lock(rows, password, profile):
-    # the obvious design, only for the demo: exact profile counts in the header, the rest of
+    # the obvious design, only for the comparison: exact profile counts in the header, the rest of
     # the lock unchanged. never use it for a real export
     parts = [vocab.decompose(r) for r in rows]
     weights = {name: {**dict.fromkeys({p[name] for p in parts}, 1),

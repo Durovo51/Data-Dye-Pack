@@ -36,15 +36,17 @@ git clone https://github.com/Durovo51/Data-Dye-Pack.git && cd Data-Dye-Pack
 ```
 
 ```bash
-python3 -m dyepack lab && python3 -m dyepack seed && python3 -m dyepack drive
-```
-
-```bash
 cp .env.example .env
 ```
 
-Set `DYEPACK_LOCK_PASSWORD` in `.env` to a password only you know. Then start the server. `--open`
-opens the dashboard in your browser.
+Set `DYEPACK_LOCK_PASSWORD` in `.env` to a password only you know. Then build the lab: a table of
+made up customers, the canary customers and the company drive with its decoy files.
+
+```bash
+python3 -m dyepack lab && python3 -m dyepack seed && python3 -m dyepack drive
+```
+
+Start the server. `--open` opens the dashboard in your browser.
 
 ```bash
 python3 -m dyepack serve --open

@@ -256,6 +256,23 @@ class GroupTest(unittest.TestCase):
             self.trip.read(sid, [f"LV{i}{n:07d}" for n in range(10)], "/api/customers")
         self.assertFalse([e for e in self.events if e["type"] == "alarm"])
 
+    def test_a_session_held_as_a_precaution_stays_out_of_the_breach_count(self):
+        oncall = {"id": "dash", "actor": "oncall", "ip": "127.0.0.1"}
+        desk = self.trip.staff_login("rep.jordan", "support", "10.0.0.11", True)
+        self.trip.read(desk, [f"LV{n:08d}" for n in range(6)], "/api/customers")  # the real rep's own lookups
+        self.now[0] += 300
+        thief = self.trip.staff_login("rep.jordan", "support", "203.0.113.7", True)
+        for page in range(2):
+            self.trip.read(thief, [f"LV9{page}{n:06d}" for n in range(100)], "/api/customers")
+        iid = self.alarms("speed")[0]["detail"]["incident"]
+        self.assertTrue(self.trip.sessions[desk]["locked"] and self.trip.sessions[thief]["locked"])
+        self.assertEqual((self.trip.incidents[iid]["sessions"], self.trip.incidents[iid]["held"]), ([thief], [desk]))
+        got = self.trip.respond(iid, "notify_customers", oncall)
+        # the notice counts what the session that tripped the wire read. the desk session gets its own line
+        self.assertEqual((got["plaintext_rows"], got["customers"], got["held_rows"]), (200, 200, 6))
+        self.trip.respond(iid, "dismiss", oncall)  # a false alarm lets every session go, the held one too
+        self.assertFalse(self.trip.sessions[desk]["locked"] or self.trip.sessions[thief]["locked"])
+
 
 class WatchLockTest(unittest.TestCase):
     def setUp(self):

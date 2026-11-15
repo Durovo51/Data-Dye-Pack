@@ -218,6 +218,13 @@ class CliTest(unittest.TestCase):
             self.assertEqual(all(a in accounts for a in shown), real)
             self.assertNotIn(pw, text)
 
+    def test_lock_command_uses_the_recipe_weights(self):
+        # lab rows come from vocab. a header built from the table's own counts would give the real list away
+        out = self.dir / "table.dye"
+        self.assertEqual(self.run_cmd(honey.cmd_lock, out=str(out), password="correct horse")[0], 0)
+        parts = json.loads(out.read_bytes().split(b"\n", 2)[1])["parts"]
+        self.assertEqual(parts, {name: dict(vocab.CATEGORIES[name]) for name in parts})
+
     def test_mistyped_confirmation_writes_nothing(self):
         out = self.dir / "typo.dye"
         with mock.patch("getpass.getpass", side_effect=["correct horse", "correct hrose"]):

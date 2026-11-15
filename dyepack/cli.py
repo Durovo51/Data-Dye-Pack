@@ -121,9 +121,9 @@ def build_parser():
     prove.add_argument("--compare", action="store_true")
     prove.set_defaults(func=_prove)
 
-    serve = sub.add_parser("serve", help="run the lab customer API, login page and mine map")
+    serve = sub.add_parser("serve", help="run the lab customer API, login page and dashboard")
     serve.add_argument("--port", type=int, default=schema.DEFAULT_PORT)
-    serve.add_argument("--open", action="store_true", help="open the mine map in your browser with the control token")
+    serve.add_argument("--open", action="store_true", help="open the dashboard in your browser with the control token")
     serve.set_defaults(func=_serve)
 
     drill = sub.add_parser("drill", help="replay a normal day, the heist or an agent on the drive")

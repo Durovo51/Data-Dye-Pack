@@ -159,8 +159,16 @@ def _row_facts(f, inc, alarms, mine, events):
     first, reasons = alarms[0] if alarms else {}, f["alarm_reasons"]
     lock = min((_ts(e) for e in mine if e.get("type") == "lock" and _ts(e) is not None), default=None)
     reads = [_d(e) for e in mine if e.get("type") == "read" and (lock is None or (_ts(e) or 0) <= lock)]
+    # a download leaves as a honey locked copy. that's a copy taken, not rows read in plain text
+    taken = [r for r in reads if str(r.get("path") or "").startswith("/api/exports/")]
+    reads = [r for r in reads if not str(r.get("path") or "").startswith("/api/exports/")]
     rows = sum(_num(r.get("rows")) for r in reads)
     ids = list(dict.fromkeys(str(c) for a in alarms for c in _d(a).get("canary_ids") or []))
+    # an alarm lists 50 canaries at most. its canary_count says how many there really were
+    counted = sum(_num(_d(a).get("canary_count")) for a in alarms if _d(a).get("reason") == "canary_touch")
+    # canaries someone logged in as or wrote to, apart from the ones a read or a download only touched
+    used = list(dict.fromkeys(str(c) for a in alarms if _d(a).get("reason") in ("canary_login", "canary_contact")
+                              for c in _d(a).get("canary_ids") or []))
     export_id = next((_d(a)["export_id"] for a in alarms if _d(a).get("export_id")), None)
     export = next((_d(e) for e in events
                    if export_id and e.get("type") == "export" and _d(e).get("export_id") == export_id), None)
@@ -181,10 +189,15 @@ def _row_facts(f, inc, alarms, mine, events):
         "rows_read": rows,
         "real_rows_exposed": max(0, rows - sum(_num(r.get("canaries")) for r in reads)),
         "peak_rows_per_minute": peak,
-        "canaries_touched": len(ids),
+        "canaries_touched": max(len(ids), counted),
         "canary_ids": ids[:5],
+        "canaries_used": used,
         "export_id": export_id,
         "export_real_rows": None if export is None else max(0, _num(export.get("rows")) - _num(export.get("canaries"))),
+        "export_rows_taken": sum(_num(r.get("rows")) for r in taken),
+        # a canary that only this copy holds got used, so someone opened the real list
+        "export_opened": any(_d(a).get("export_id") and _d(a).get("reason") in ("canary_login", "canary_contact")
+                             for a in alarms),
         "stolen_login_attempts": sum(_d(a).get("reason") in _LOGINS for a in alarms),
     }
 
@@ -248,7 +261,8 @@ def _actions(f):
         acts.append("lock")
     if f["export_id"] or (f["session"] and not f["outside"]):
         acts.append("revoke")
-    if f["real_rows_exposed"] or f["export_real_rows"]:
+    # a copy that left honey locked exposes nobody until someone opens it
+    if f["real_rows_exposed"] or (f["export_real_rows"] and f["export_opened"]):
         acts.append("notify_customers")
     return acts
 
@@ -274,6 +288,8 @@ def _title(f):
         return f"Stolen logins from export {exp}" if exp else "Logins from a cracked copy"
     if "canary_contact" in reasons:
         return "A canary customer was contacted"
+    if exp and f["export_rows_taken"] and not f["rows_read"]:
+        return f"Export {exp} downloaded by {who}"
     if "speed" in reasons:
         return f"Bulk read by {who}"
     if "canary_touch" in reasons:
@@ -294,13 +310,16 @@ def _next_step(f):
             steps.append("put the locked files back with dyepack unlock once it's stopped")
         return "Next, " + _join(steps) + "."
     exp, who = f["export_id"], f["actor"] or "the account"
+    exposed = (f["export_real_rows"] if f["export_opened"] else 0) or f["real_rows_exposed"]
     say = {
         "lock": "block where these logins came from" if f["stolen_login_attempts"] else "lock the session",
         "revoke": f"revoke export {exp}" if exp else f"revoke {who}'s login",
-        "notify_customers": f"tell the {f['export_real_rows'] or f['real_rows_exposed']:,.0f} affected customers",
+        "notify_customers": f"tell the {exposed:,.0f} affected customers",
         "dismiss": "mark it as a false alarm if this was normal support work",
     }
     steps = [say[a] for a in f["recommended_actions"]]
+    if exp and not f["export_opened"] and "revoke" in f["recommended_actions"]:
+        steps.append("watch for its canaries, which fire if anyone opens the real list")
     if not steps:
         return "Next, find which copy of the customer list held that canary and who had access to it."
     return "Next, " + _join(steps) + "."
@@ -314,6 +333,9 @@ def _template(f):
     agent = f["looks_like"] == "ai_agent"
     who = (actor or "An unknown user") + (f" from {f['ip']}" if f["ip"] else "")
     lock = f" and the tripwire locked the {f['locked_what']} automatically" if f["session_locked"] else ""
+    took, opened = f["export_rows_taken"], f["export_opened"]
+    # a copy that was downloaded and nothing more. it left honey locked and nobody has opened it
+    copy_only = bool(exp and took and not opened and not rows and not logins)
     s = []
 
     if logins:
@@ -322,10 +344,12 @@ def _template(f):
     elif "canary_contact" in reasons:
         s.append("Someone outside the company emailed or called a canary customer, "
                  "which looks like a person working from a leaked list.")
-    elif rows:
+    elif rows or (took and exp):
         rate = f["peak_rows_per_minute"]
-        peak = f" (peak {rate:,.0f} rows a minute)" if rate else ""
-        s.append(f"{who} read {rows:,.0f} customer rows at {'machine speed' if agent else 'a human pace'}{peak}, "
+        pace = f"at {'machine speed' if agent else 'a human pace'}" + (f" (peak {rate:,.0f} rows a minute)" if rate else "")
+        did = f"read {rows:,.0f} customer rows" if rows else \
+            f"downloaded export {exp}, a honey locked copy of {took:,.0f} customer rows,"
+        s.append(f"{who} {did} {pace}, "
                  f"which looks like {f'{MACHINE} rather than a person' if agent else f'a person rather than {MACHINE}'}.")
     else:
         s.append(f"{who} set off an alarm.")
@@ -337,9 +361,15 @@ def _template(f):
     else:
         s.append(f"The first alarm fired {_dur(secs)} after the activity started{lock}.")
 
-    if n:
+    reached = "canary_contact" in reasons
+    if logins or reached:
+        # only the canaries that got used. ones a download in the same incident touched don't count here
+        n, ids = len(f["canaries_used"]), f["canaries_used"][:5]
+    if copy_only:
+        pass  # the line about the copy says what it holds
+    elif n:
         more = " and more" if n > len(ids) else ""
-        verb = "used the logins of" if logins else "reached" if "canary_contact" in reasons else "touched"
+        verb = ("used or contacted" if reached else "used the logins of") if logins else "reached" if reached else "touched"
         s.append(f"It {verb} {_plural(n, 'canary customer')} ({', '.join(ids)}{more}).")
     elif "unknown_account_login" in reasons:
         s.append("Those usernames don't exist anywhere, which means they came from a copy opened with a wrong password.")
@@ -348,13 +378,20 @@ def _template(f):
     else:
         s.append("No canary customers were touched.")
 
-    if exp:
+    real = f["export_real_rows"]
+    if exp and opened:
         s.append(f"Those canaries were only ever planted in export {exp}, which makes it the copy that leaked." if n
                  else f"The alarm points to export {exp} as the copy that leaked.")
+    elif exp:
+        inside = "" if real is None else (f" with {real:,.0f} real customer rows"
+                                          + (f" and {_plural(n, 'canary customer')}" if copy_only and n else "") + " inside")
+        s.append(f"Export {exp} left honey locked{inside}. Its rows stay unreadable without the password "
+                 "and any use of its canaries will name this copy.")
 
-    if exp and f["export_real_rows"] is not None:
-        s.append(f"Export {exp} holds {f['export_real_rows']:,.0f} real customer rows "
-                 "and all of them should be treated as exposed.")
+    if exp and opened and real is not None:
+        s.append(f"Export {exp} holds {real:,.0f} real customer rows and all of them should be treated as exposed.")
+    elif copy_only:
+        pass  # nothing was read in plain text and the line above already says so
     elif rows:
         done = "exposed" if f["recommended_actions"] != ["dismiss"] else "read"
         when = "before the lock" if lock else "so far"
@@ -437,8 +474,14 @@ def _tidy(text):
 def _for_model(f):
     """The facts the way the model should read them: plain words, finished times and no zero speeds."""
     raw = ("looks_like", "seconds_to_first_alarm", "seconds_to_lock", "session_locked", "locked_what", "outside",
-           "recommended_actions", "canaries_touched", "canary_ids", "alarm_reasons")
+           "recommended_actions", "canaries_touched", "canary_ids", "canaries_used", "alarm_reasons", "export_opened",
+           "export_rows_taken")
     m = {k: v for k, v in f.items() if k not in raw}
+    if f.get("export_id"):
+        if f["export_rows_taken"]:
+            m["export_rows_downloaded"] = f["export_rows_taken"]
+        m["export_copy"] = ("someone opened it with the right password, so every real row in it is exposed"
+                            if f["export_opened"] else "left honey locked, its rows are unreadable without the password")
     m["what_set_it_off"] = [_SAID.get(r, r) for r in f["alarm_reasons"]]
     m["pace_looks_like"] = MACHINE if f["looks_like"] == "ai_agent" else "a person"
     if f["seconds_to_first_alarm"] is not None:
@@ -537,9 +580,10 @@ def _date(d):
 def notice_checklist(incident, detail):
     """Plain lines for telling people about a breach, for the notify_customers step.
 
-    detail can carry customers, plaintext_rows, locked_copies and found_at (epoch seconds, when the
-    breach was found). The clocks are the FCC rule for carriers (47 CFR 64.2011) and Wisconsin's
-    notice law (Wis. Stat. 134.98). Lab guidance, not legal advice.
+    detail can carry customers, plaintext_rows, locked_copies, held_rows (rows read by sessions of the
+    same login that were only locked as a precaution) and found_at (epoch seconds, when the breach
+    was found). The clocks are the FCC rule for carriers (47 CFR 64.2011) and Wisconsin's notice
+    law (Wis. Stat. 134.98). Lab guidance, not legal advice.
     """
     iid = (incident.get("id") or incident.get("incident")) if isinstance(incident, dict) else incident
     d = detail if isinstance(detail, dict) else {}
@@ -556,6 +600,10 @@ def notice_checklist(incident, detail):
     # the server sends the locked copies as a list of names, older callers as a count
     copies = len(locked) if isinstance(locked, (list, tuple)) else _num(locked)
     files = [f for f in (d.get("plaintext_files") or []) if isinstance(f, str)]
+    # a canary that only the locked copy holds got used. nobody gets it from a wrong password
+    reasons = (incident.get("reasons") or []) if isinstance(incident, dict) else []
+    opened = bool(copies) and isinstance(incident, dict) and bool(incident.get("export_id")) and \
+        any(r in ("canary_login", "canary_contact") for r in reasons)
     count = _num(d.get("customers")) or _num(plain)
     parts = [f"{_num(plain):,.0f} rows in plain text"] if plain is not None else []
     if copies:
@@ -572,8 +620,15 @@ def notice_checklist(incident, detail):
         names += f" and {len(files) - 4} more" if len(files) > 4 else ""
         lines.insert(2, f"Read in plain text before the lock: {names}. "
                         f"Treat everyone in {'it' if len(files) == 1 else 'them'} as affected")
-    elif plain is not None and _num(plain) == 0:
+    elif opened:
+        lines.append("A canary from the locked copy was used, which means someone opened it with the right password. "
+                     "Treat everyone in it as affected")
+    elif copies and plain is not None and _num(plain) == 0:
         lines.append("Locked copy only: likely exempt as encrypted data, check with counsel")
+    held = _num(d.get("held_rows"))
+    if held:
+        lines.append(f"Other sessions of the same login read {_plural(int(held), 'more row')} without an alarm. "
+                     "They are locked too. Add those rows unless the real user made them")
     lines.append("A notice must say what happened, what data was involved, what we did, "
                  "what they can do and who to contact")
     return lines

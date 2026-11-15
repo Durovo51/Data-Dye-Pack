@@ -429,6 +429,54 @@ class ReportTests(unittest.TestCase):
                     "Next, block where these logins came from, revoke export exp-2 and tell the 49,800 affected customers."):
             self.assertIn(bit, r["text"])
 
+    def test_template_for_a_downloaded_export_that_nobody_opened(self):
+        # the copy left honey locked. saying its rows are exposed would undo the whole point of the lock
+        casey = {"session": "s-5", "actor": "rep.casey", "ip": "203.0.113.9"}
+        ev = [{"ts": 200.0, "type": "export", **casey, "severity": "info",
+               "detail": {"export_id": "exp-1", "rows": 50400, "canaries": 400}},
+              {"ts": 201.0, "type": "read", **casey, "severity": "info",
+               "detail": {"rows": 50400, "canaries": 400, "path": "/api/exports/exp-1"}},
+              {"ts": 201.0, "type": "alarm", **casey, "severity": "high",
+               "detail": {"reason": "speed", "incident": "inc-2", "canary_ids": [], "canary_count": 0,
+                          "export_id": "exp-1", "rate_per_min": 302400}},
+              {"ts": 201.0, "type": "alarm", **casey, "severity": "high",
+               "detail": {"reason": "canary_touch", "incident": "inc-2", "canary_ids": [f"c-{i:03d}" for i in range(1, 51)],
+                          "canary_count": 400, "export_id": "exp-1", "rate_per_min": 302400}},
+              {"ts": 201.0, "type": "lock", **casey, "severity": "high", "detail": {"incident": "inc-2", "what": "session"}}]
+        r = assay.write_report("inc-2", ev)
+        self.assertEqual((r["title"], r["actions"]), ("Export exp-1 downloaded by rep.casey", ["revoke"]))
+        self.assertReadable(r["text"])
+        for bit in ("rep.casey from 203.0.113.9 downloaded export exp-1, a honey locked copy of 50,400 customer rows, "
+                    "at machine speed (peak 302,400 rows a minute)",
+                    "Export exp-1 left honey locked with 50,000 real customer rows and 400 canary customers inside.",
+                    "Its rows stay unreadable without the password and any use of its canaries will name this copy.",
+                    "Next, revoke export exp-1 and watch for its canaries, which fire if anyone opens the real list."):
+            self.assertIn(bit, r["text"])
+        for bit in ("treated as exposed", "affected customers", "copy that leaked", "50 canary customers"):
+            self.assertNotIn(bit, r["text"])
+        facts = assay._for_model(assay._facts("inc-2", ev))
+        self.assertEqual((facts["real_rows_exposed"], facts["export_rows_downloaded"], facts["canary_customers_touched"]),
+                         (0, 50400, 400))
+        self.assertEqual(facts["export_copy"], "left honey locked, its rows are unreadable without the password")
+        # once one of its canaries gets used, the same copy counts as opened
+        ev.append({"ts": 300.0, "type": "alarm", "session": "p-1", "actor": "jsmith07", "ip": "203.0.113.50",
+                   "severity": "critical", "detail": {"reason": "canary_login", "incident": "inc-2", "canary_ids": ["c-4501"],
+                                                      "export_id": "exp-1", "rate_per_min": 0}})
+        opened = assay.write_report("inc-2", ev)
+        self.assertIn("Export exp-1 holds 50,000 real customer rows and all of them should be treated as exposed.",
+                      opened["text"])
+        self.assertIn("notify_customers", opened["actions"])
+        # the 400 canaries the download touched are not logins someone used
+        self.assertIn("It used the logins of 1 canary customer (c-4501).", opened["text"])
+
+    def test_template_tells_a_login_from_a_contact(self):
+        # one canary's login was tried and another was emailed. "used the logins of 2" would be wrong
+        ev = stolen_logins()
+        ev[-1] = dict(ev[-1], detail=dict(ev[-1]["detail"], reason="canary_contact"))
+        text = assay.write_report("inc-2", ev)["text"]
+        self.assertIn("It used or contacted 2 canary customers (c-301, c-302).", text)
+        self.assertNotIn("used the logins of", text)
+
     def test_template_for_a_person_at_human_speed(self):
         r = assay.write_report("inc-3", human_touch())
         self.assertEqual((r["title"], r["looks_like"], r["actions"]), ("Canary touched by rep.casey", "person", ["dismiss"]))
@@ -703,6 +751,27 @@ class NoticeTests(unittest.TestCase):
         self.assertIn("Customers in Wisconsin: by Tue Dec 29, 2026 (45 days, Wis. Stat. 134.98)", lines)
         self.assertNotIn("Locked copy only: likely exempt as encrypted data, check with counsel",
                          assay.notice_checklist("inc-9", {"plaintext_rows": 5}))
+        # no copy left the building, so there is no locked copy to call exempt
+        self.assertNotIn("Locked copy only: likely exempt as encrypted data, check with counsel",
+                         assay.notice_checklist("inc-9", {"plaintext_rows": 0}))
+
+    def test_a_used_canary_means_the_locked_copy_was_opened(self):
+        detail = {"customers": 50000, "plaintext_rows": 0, "locked_copies": ["exp-1"], "found_at": self.found(2026, 11, 14)}
+        lines = assay.notice_checklist({"id": "inc-3", "export_id": "exp-1", "reasons": ["canary_login"]}, detail)
+        self.assertIn("A canary from the locked copy was used, which means someone opened it with the right password. "
+                      "Treat everyone in it as affected", lines)
+        self.assertNotIn("Locked copy only: likely exempt as encrypted data, check with counsel", lines)
+        # a copy that was only downloaded stays likely exempt
+        taken = assay.notice_checklist({"id": "inc-2", "export_id": "exp-1", "reasons": ["speed", "canary_touch"]}, detail)
+        self.assertIn("Locked copy only: likely exempt as encrypted data, check with counsel", taken)
+
+    def test_rows_from_held_sessions_get_their_own_line(self):
+        lines = assay.notice_checklist("inc-1", {"customers": 200, "plaintext_rows": 200, "held_rows": 6,
+                                                 "found_at": self.found(2026, 11, 14)})
+        self.assertEqual(lines[1], "Who is affected by inc-1: 200 customers (200 rows in plain text)")
+        self.assertIn("Other sessions of the same login read 6 more rows without an alarm. "
+                      "They are locked too. Add those rows unless the real user made them", lines)
+        self.assertFalse([x for x in assay.notice_checklist("inc-1", {"plaintext_rows": 200}) if "Other sessions" in x])
 
     def test_files_read_in_plain_text(self):
         lines = assay.notice_checklist("inc-4", {

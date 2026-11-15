@@ -68,7 +68,7 @@ def _lit(v):
         return f"timestamp_seconds({v.timestamp()!r})"
     if not isinstance(v, str):
         v = json.dumps(v, default=str)
-    # backslash escapes are the Databricks SQL default. $ goes in as $ so ${...} never gets substituted
+    # backslash escapes are the Databricks SQL default. $ goes in as a unicode escape so ${...} never gets substituted
     v = v.replace("\\", "\\\\").replace("'", "\\'").replace("$", "\\u0024")
     return f"'{v}'"
 

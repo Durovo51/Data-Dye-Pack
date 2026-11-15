@@ -279,7 +279,7 @@ class Tripwire:
         opened = inc is None or inc["status"] == "dismissed"
         if opened:
             inc = {"id": self._id("inc"), "severity": severity, "status": "open", "opened": self.clock(),
-                   "session": s["id"], "actor": s["actor"], "ip": s["ip"], "sessions": [],
+                   "session": s["id"], "actor": s["actor"], "ip": s["ip"], "sessions": [], "held": [],
                    "export_id": None, "canary_ids": [], "reasons": [], "locked": False}
             self.incidents[inc["id"]] = inc
         escalated = not opened and RANK[severity] > RANK[inc["severity"]]
@@ -307,11 +307,12 @@ class Tripwire:
         return inc
 
     def _lock_actor(self, s, inc):
-        # every open session of that person goes, not only the one that tripped
+        # every open session of that person goes, not only the one that tripped. the others are held as
+        # a precaution. one may be the real rep at their desk, so their reads stay out of the breach count
         for other in list(self.sessions.values()):
             if other["actor"] == s["actor"] and other["role"] == s["role"] and not other["locked"]:
-                if other["id"] not in inc["sessions"]:
-                    inc["sessions"].append(other["id"])
+                if other["id"] not in inc["sessions"] and other["id"] not in inc["held"]:
+                    inc["held"].append(other["id"])
                 self.by_session[other["id"]] = inc["id"]
                 self._lock(other, inc, "session")
 
@@ -327,6 +328,7 @@ class Tripwire:
             inc = self.incidents[iid]
             detail = {"incident": iid, "action": action}
             sessions = [self.sessions[sid] for sid in inc["sessions"] if sid in self.sessions]
+            held = [self.sessions[sid] for sid in inc.get("held", []) if sid in self.sessions]
             if action == "lock":
                 for s in sessions:
                     if not s["locked"] and s["role"] != "process":
@@ -351,6 +353,10 @@ class Tripwire:
                 detail["locked_copies"] = ([inc["export_id"]] if inc["export_id"] else []) + \
                     [_on_drive(f) for f in inc.get("locked_files", [])]
                 detail["found_at"] = inc["opened"]
+                # rows read by sessions that were only held never set off an alarm. they get a line of their own
+                also = sum(s.get("exposed", 0) for s in held)
+                if also:
+                    detail["held_rows"] = also
                 if self.checklist:
                     try:
                         detail["checklist"] = self.checklist(dict(inc), dict(detail))
@@ -358,7 +364,7 @@ class Tripwire:
                         pass  # a drafted notice is nice to have, the action still counts
             elif action == "dismiss":
                 inc["status"] = "dismissed"
-                for s in sessions:
+                for s in sessions + held:
                     s["locked"], s["fast"], s["touched"] = False, False, set()
                     self.locked_ips.discard(s["ip"])
                     self.groups.pop(("actor", s["actor"]), None)
