@@ -3,154 +3,245 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Data Dyepack mine map</title>
-  <meta name="description" content="Live map of a customer table and company drive with canary customers, decoy files, alarms and stained exports.">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2310151b'/%3E%3Cpath d='M5 22l5-11h12l5 11z' fill='%23d6a23b'/%3E%3Ccircle cx='22' cy='21' r='6' fill='%23e5303d'/%3E%3C/svg%3E">
+  <meta name="referrer" content="no-referrer">
+  <meta name="description" content="Follow live read activity, suspicious access, and containment in Data Dyepack.">
+  <title>Data Dyepack</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 4 5v6c0 5 3.6 8.8 8 11 4.4-2.2 8-6 8-11V5z' fill='%233b4149'/%3E%3Cpath d='m8.5 12 2.4 2.4 4.6-4.8' fill='none' stroke='white' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
   <script type="module" src="app.js"></script>
 </head>
 <body>
-  <header class="top">
-    <div class="brand">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
-        <path class="ingot" d="M5 22l5-11h12l5 11z"/>
-        <circle class="dye" cx="22" cy="21" r="6"/>
-      </svg>
-      <div>
-        <h1>Data Dyepack</h1>
-        <p>Mine map · Lakeview Fiber lab</p>
+  <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2.5a27 27 0 0 0 7.5 3.2v5.8c0 4.4-3.1 7.6-7.5 10-4.4-2.4-7.5-5.6-7.5-10V5.7A27 27 0 0 0 12 2.5Z"/><path d="m8.8 11.8 2.2 2.3 4.2-4.3"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.25"/><circle cx="12" cy="12" r="1.25"/><circle cx="19" cy="12" r="1.25"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="m14 5-7 7 7 7"/></symbol>
+  </svg>
+  <a id="skip-view" class="skip" href="#overview">Skip to content</a>
+  <header class="product-nav">
+    <nav class="product-nav-inner" aria-label="Data Dyepack">
+      <a class="product-mark" href="#overview">Data Dyepack</a>
+      <div class="product-links">
+        <a id="overview-link" href="#overview" aria-current="page">Overview</a>
+        <a id="alerts-link" class="launch-button" href="#alerts">Alerts<span id="nav-alert-count" class="nav-alert-count" hidden></span></a>
       </div>
-    </div>
-    <div class="mode">
-      <span id="conn" class="conn" data-state="connecting">Connecting</span>
-      <p id="conn-note" class="conn-note" hidden>Can't reach the live stream. <a href="?replay=1">Watch the recorded drill</a></p>
-      <div id="player" class="player" hidden>
-        <button id="play" type="button">Pause</button>
-        <div class="speeds" role="group" aria-label="Replay speed">
-          <button type="button" data-speed="1" aria-pressed="true">1x</button>
-          <button type="button" data-speed="4" aria-pressed="false">4x</button>
-        </div>
-        <button id="restart" type="button">Restart</button>
-        <span id="clock" class="clock">0:00 / 0:00</span>
-      </div>
-    </div>
+    </nav>
   </header>
 
-  <section id="status" class="status" data-state="clear" aria-label="Status">
-    <div class="lamp" role="status">
-      <svg class="icon i-clear" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M7.5 12.5l3 3 6-6.5"/></svg>
-      <svg class="icon i-alarm" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5L2.8 19.5h18.4z"/><path d="M12 9.8v4.6M12 17v.4"/></svg>
-      <svg class="icon i-locked" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg>
-      <strong id="status-word">All clear</strong>
-    </div>
-    <p id="status-line" class="status-line" aria-live="polite">Waiting for the first events.</p>
-    <ol id="phases" class="phases" aria-label="Drill steps">
-      <li data-phase="normal">Normal day</li>
-      <li data-phase="heist-1"><b>1</b>Bulk read</li>
-      <li data-phase="heist-2"><b>2</b>Crack the backup</li>
-      <li data-phase="heist-3"><b>3</b>Use stolen logins</li>
-      <li data-phase="agent"><b>4</b>Agent digs the drive</li>
-    </ol>
-  </section>
-
-  <main class="board">
-    <section class="panel mine-panel" aria-labelledby="mine-h">
-      <h2 id="mine-h">The mine <small>Lakeview Fiber customer table</small></h2>
-      <div id="mine" class="mine"></div>
-      <ul class="legend">
-        <li><i class="sw gold"></i>Real customer rows</li>
-        <li><i class="sw canary"></i>Canary customer</li>
-        <li><i class="sw dug"></i>Rows already read</li>
-        <li><i class="sw dye"></i>Alarm or lock</li>
-        <li><i class="sw crate"></i>Export copy</li>
-      </ul>
+  <main id="overview" class="overview" tabindex="-1">
+    <section class="launch-hero" aria-labelledby="launch-heading">
+      <header class="launch-intro">
+        <h1 id="launch-heading">Every breach<br class="launch-break"> leaves a trace.</h1>
+        <p>See suspicious access and follow the response as it happens.</p>
+        <a id="launch-watch" class="launch-watch" href="?replay=1">Watch the recorded drill<svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></a>
+      </header>
+      <div class="launch-art" aria-hidden="true"></div>
     </section>
 
-    <div class="cols">
-      <div class="col">
+    <section id="activity" class="launch-activity" aria-labelledby="activity-heading">
+      <header class="activity-heading">
+        <h2 id="activity-heading">Activity</h2>
+        <p id="overview-conn" class="connection" role="status" data-state="connecting">Connecting</p>
+      </header>
+
+      <section class="launch-chart" aria-labelledby="traffic-heading">
+        <header class="chart-heading">
+          <div>
+            <h3 id="traffic-heading">Read speed</h3>
+            <p class="chart-value"><strong id="traffic-rate">–</strong><span>rows/min</span></p>
+          </div>
+          <div class="chart-period" role="group" aria-label="Read speed time range">
+            <button type="button" data-range="30" aria-pressed="false">30 sec</button>
+            <button type="button" data-range="180" aria-pressed="true">3 min</button>
+          </div>
+        </header>
+        <div id="traffic-chart" class="traffic-chart"></div>
+        <footer class="chart-caption">
+          <span id="traffic-peak">Waiting for read samples</span>
+          <span id="traffic-marker-key" class="marker-key" hidden>Alarm</span>
+        </footer>
+      </section>
+
+      <div class="activity-grid">
+        <section class="launch-metric" aria-labelledby="severity-heading">
+          <h3 id="severity-heading">Alert severity</h3>
+          <p class="metric-context">Highest severity reached per incident</p>
+          <dl id="severity-chart" class="severity-chart"></dl>
+        </section>
+        <section class="launch-metric" aria-labelledby="containment-heading">
+          <h3 id="containment-heading">Time to containment</h3>
+          <p class="metric-context">From first alarm to first containment action</p>
+          <p id="containment-empty" class="launch-empty">Waiting for alerts</p>
+          <ol id="containment-chart" class="containment-chart"></ol>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <main id="main" class="app" tabindex="-1" hidden>
+    <aside class="alert-sidebar" aria-labelledby="alerts-heading">
+      <header class="sidebar-heading">
+        <div class="sidebar-title">
+          <h1 id="alerts-heading" tabindex="-1">Alerts</h1>
+          <p id="alert-count">Lakeview Fiber</p>
+        </div>
+        <span id="mobile-conn" class="connection mobile-connection" data-state="connecting" role="status">Connecting</span>
+        <details id="app-menu" class="menu">
+          <summary class="icon-button" aria-label="More options" title="More options"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></summary>
+          <div class="menu-items">
+            <a id="mode-link" href="?replay=1">Watch recorded drill</a>
+            <button id="show-tools" type="button">Lab tools and settings</button>
+          </div>
+        </details>
+      </header>
+      <ul id="alert-list" class="alert-list" aria-label="Security alerts"></ul>
+    </aside>
+
+    <section id="alert-pane" class="alert-pane" aria-label="Selected alert">
+      <header class="detail-toolbar">
+        <button id="back-to-alerts" class="back-button" type="button"><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg>Alerts</button>
+        <details id="actions" class="menu response-menu" hidden>
+          <summary class="button"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Actions<svg class="icon down" aria-hidden="true"><use href="#i-down"/></svg></summary>
+          <div id="action-items" class="menu-items"></div>
+        </details>
+        <div class="toolbar-status">
+          <span id="conn" class="connection" data-state="connecting" role="status">Connecting</span>
+        </div>
+      </header>
+      <div class="reading-pane">
+        <div id="empty-alert" class="empty-alert">
+          <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>
+          <h2 id="empty-title">Waiting for Alerts</h2>
+          <p id="empty-message">Connecting to Lakeview Fiber.</p>
+        </div>
+        <article id="incident" class="incident" hidden>
+          <header class="incident-header">
+            <div class="incident-symbol" aria-hidden="true"><svg class="icon"><use href="#i-shield"/></svg></div>
+            <div class="incident-heading">
+              <p id="incident-meta" class="incident-meta"></p>
+              <h2 id="incident-title" tabindex="-1"></h2>
+              <p id="incident-source" class="incident-source"></p>
+            </div>
+            <time id="incident-time" class="incident-time"></time>
+          </header>
+          <p id="response-note" class="response-note" hidden></p>
+          <p id="incident-summary" class="incident-summary"></p>
+          <div id="incident-facts"></div>
+          <div id="incident-outcome" role="status"></div>
+          <details id="incident-report" class="disclosure" hidden>
+            <summary>Report</summary>
+            <div id="report-body" class="disclosure-body"></div>
+          </details>
+          <details id="incident-activity" class="disclosure">
+            <summary>Activity <span id="activity-count" class="disclosure-count"></span></summary>
+            <ol id="incident-events" class="activity-list"></ol>
+          </details>
+        </article>
+      </div>
+    </section>
+
+  </main>
+
+  <div id="player" class="player" aria-label="Recorded drill playback" hidden>
+    <span class="recording-label">Recorded drill</span>
+    <button id="play" class="button" type="button" disabled>Pause</button>
+    <span id="clock" class="clock">0:00 / 0:00</span>
+    <button id="restart" class="button" type="button" disabled>Restart</button>
+    <select id="replay-speed" class="button" aria-label="Playback speed" disabled><option value="1">1×</option><option value="4">4×</option></select>
+    <a class="back-live" href="./">End replay</a>
+  </div>
+
+  <dialog id="lab-tools" class="tools" aria-labelledby="tools-title">
+    <header class="sheet-header"><h2 id="tools-title">Lab Tools</h2><form method="dialog"><button class="button" type="submit" autofocus>Done</button></form></header>
+    <div class="tool-groups">
+      <details class="disclosure">
+        <summary>Alert routing</summary>
+        <div class="disclosure-body">
+        <section class="panel routes-panel" aria-labelledby="routes-h">
+          <h2 id="routes-h">Alert routes <small>Notification channels by severity</small></h2>
+          <table class="routes">
+            <thead><tr><th scope="col">Severity</th><th scope="col">Push</th><th scope="col">SMS</th><th scope="col">Email</th><th scope="col">Discord</th></tr></thead>
+            <tbody id="routes-body"></tbody>
+          </table>
+          <p id="routes-note" class="routes-note" role="status">Loading alert routes…</p>
+          <button id="retry-routes" type="button" class="button" hidden>Retry loading</button>
+        </section>
+        </div>
+      </details>
+      <details class="disclosure">
+        <summary>Notification history</summary>
+        <div class="disclosure-body">
+        <section class="panel phone-panel" aria-labelledby="phone-h">
+          <h2 id="phone-h">On-call notifications <small>Latest delivery results</small></h2>
+          <ol id="phone-notes" class="phone-notes"></ol>
+          <p id="phone-empty" class="empty">No notifications recorded.</p>
+        </section>
+        </div>
+      </details>
+      <details class="disclosure">
+        <summary>Lab diagnostics</summary>
+        <div class="diagnostics">
+        <section class="panel mine-panel" aria-labelledby="mine-h">
+            <h2 id="mine-h">Customer table <small>Canary hits and export activity</small></h2>
+            <div id="mine" class="mine"></div>
+            <ul class="legend">
+              <li><i class="sw gold"></i>Customer rows</li><li><i class="sw canary"></i>Canary</li>
+              <li><i class="sw dug"></i>Read rows</li><li><i class="sw dye"></i>Alarm or lock</li>
+              <li><i class="sw crate"></i>Export</li>
+            </ul>
+          </section>
+        <section class="panel speed-panel" aria-labelledby="speed-h">
+            <h2 id="speed-h">Read speed <small>Customer table · last 3 minutes</small></h2>
+            <div class="now"><strong id="rate">–</strong><span>rows/min</span></div>
+            <div id="chart" class="chart"></div>
+          </section>
         <section class="panel drive-panel" aria-labelledby="drive-h">
-          <h2 id="drive-h">The drive <small>company files, every file open is watched</small></h2>
+          <h2 id="drive-h">Company drive <small>File activity and decoy hits</small></h2>
           <div class="proc">
             <div class="proc-who">
-              <span class="label">Reading the drive</span>
-              <strong id="proc-name">Nobody yet</strong>
-              <span id="proc-last" class="who">Every file open on the drive shows up here.</span>
+              <span class="label">Latest reader</span>
+              <strong id="proc-name">No activity yet</strong>
+              <span id="proc-last" class="who"></span>
             </div>
-            <div class="proc-speed"><strong id="proc-fpm">0</strong><span id="proc-unit">files a minute</span></div>
+            <div class="proc-speed"><strong id="proc-fpm">0</strong><span id="proc-unit">files/min</span></div>
             <p id="proc-pace" class="pace" hidden></p>
           </div>
           <div id="drive" class="drive"></div>
           <ul class="legend">
-            <li><i class="sw gold"></i>Customer file</li>
-            <li><i class="sw canary"></i>Decoy file</li>
-            <li><i class="sw steel"></i>Honey locked backup</li>
-            <li><i class="sw rock"></i>Other file</li>
-            <li><i class="sw crate"></i>Locked in place, unlock with one command</li>
+            <li><i class="sw gold"></i>Customer file</li><li><i class="sw canary"></i>Decoy file</li>
+            <li><i class="sw steel"></i>Encrypted backup</li><li><i class="sw rock"></i>Other file</li>
+            <li><i class="sw crate"></i>Locked in place</li>
           </ul>
         </section>
-
-        <section class="panel speed-panel" aria-labelledby="speed-h">
-          <h2 id="speed-h">Read speed <small>customer table, last 3 minutes</small></h2>
-          <div class="now"><strong id="rate">0</strong><span>rows a minute right now</span></div>
-          <div id="chart" class="chart"></div>
-        </section>
-
         <section class="panel prints-panel" aria-labelledby="prints-h">
-          <h2 id="prints-h">Export fingerprints <small>each export carries its own canaries</small></h2>
+          <h2 id="prints-h">Export fingerprints <small>Canary matches identify a leaked copy</small></h2>
           <ol id="prints" class="prints"></ol>
-          <p id="prints-empty" class="empty">No exports yet. Each one gets its own canaries. That lets an alarm name the exact copy that leaked.</p>
+          <p id="prints-empty" class="empty">No exports observed.</p>
         </section>
-      </div>
-
-      <div class="col">
-        <section class="panel incident-panel" aria-labelledby="inc-h">
-          <h2 id="inc-h">Incidents <small>triage, report and response</small></h2>
-          <div id="incidents" class="incidents"></div>
-        </section>
-
-        <section class="panel feed-panel" aria-labelledby="feed-h">
-          <h2 id="feed-h">Alarm feed <small>newest first</small></h2>
-          <ol id="feed" class="feed"></ol>
-          <p id="feed-empty" class="empty">No alarms yet. A normal day should stay empty.</p>
-        </section>
-      </div>
-
-      <div class="col">
-        <section class="panel phone-panel" aria-labelledby="phone-h">
-          <h2 id="phone-h">On-call phone <small>what the security team just got</small></h2>
-          <div class="phone">
-            <p id="phone-date" class="phone-date"></p>
-            <p id="phone-time" class="phone-time"></p>
-            <ol id="phone-notes" class="phone-notes"></ol>
-            <p id="phone-empty" class="phone-empty">No alerts yet</p>
-          </div>
-        </section>
-
-        <section class="panel score-panel" aria-labelledby="score-h">
-          <h2 id="score-h">Drill scoreboard <small>fills in as the drill runs</small></h2>
-          <div class="tiles">
-            <div class="tile" id="t-normal_alarms"><span class="k">Normal day alarms</span><b class="v wait">Not yet</b><span class="n">Goal: 0</span></div>
-            <div class="tile" id="t-detect_seconds"><span class="k">Time to catch the bulk read</span><b class="v wait">Not yet</b><span class="n">Goal: 10 s or less</span></div>
-            <div class="tile" id="t-rows_exposed"><span class="k">Real rows exposed</span><b class="v wait">Not yet</b><span class="n">As few as possible</span></div>
-            <div class="tile" id="t-guesses_cracked"><span class="k">Guesses that opened a believable list</span><b class="v wait">Not yet</b><span class="n">Every wrong password still opens a list</span></div>
-            <div class="tile" id="t-ai_pick"><span class="k">Can an AI pick the real list?</span><b class="v wait">Not yet</b><span class="n">Goal: no better than chance</span></div>
-          </div>
-        </section>
-
-        <section class="panel routes-panel" aria-labelledby="routes-h">
-          <h2 id="routes-h">Alert routes <small>who gets told for each severity</small></h2>
-          <table class="routes">
-            <thead><tr><th scope="col"><span class="sr">Severity</span></th><th scope="col">Push</th><th scope="col">SMS</th><th scope="col">Email</th><th scope="col">Discord</th></tr></thead>
-            <tbody id="routes-body"></tbody>
-          </table>
-          <p id="routes-note" class="empty routes-note"></p>
-        </section>
-      </div>
+      <section class="panel score-panel" aria-labelledby="score-h">
+        <h2 id="score-h">Drill results <small>Updates during a drill</small></h2>
+        <div class="tiles">
+          <div class="tile" id="t-normal_alarms"><span class="k">Normal activity alarms</span><b class="v wait">Pending</b><span class="n">Goal: 0</span></div>
+          <div class="tile" id="t-detect_seconds"><span class="k">Bulk read detection</span><b class="v wait">Pending</b><span class="n">Goal: 10 seconds or less</span></div>
+          <div class="tile" id="t-rows_exposed"><span class="k">Real rows exposed</span><b class="v wait">Pending</b><span class="n">Measured before containment</span></div>
+          <div class="tile" id="t-guesses_cracked"><span class="k">Believable lists opened</span><b class="v wait">Pending</b><span class="n">From incorrect passwords</span></div>
+          <div class="tile" id="t-ai_pick"><span class="k">AI identified the real list</span><b class="v wait">Pending</b><span class="n">Goal: no better than chance</span></div>
+        </div>
+      </section>
+        </div>
+      </details>
     </div>
-  </main>
+  </dialog>
 
-  <div id="bloom" class="bloom" aria-hidden="true"></div>
-  <div class="dye-edge" aria-hidden="true"></div>
-  <p id="toast" class="toast" role="status" hidden></p>
+  <dialog id="confirm-action" class="confirmation" aria-labelledby="confirm-title" aria-describedby="confirm-detail">
+    <h2 id="confirm-title"></h2>
+    <p id="confirm-detail"></p>
+    <form method="dialog">
+      <button class="button" value="cancel" autofocus>Cancel</button>
+      <button id="confirm-button" class="button danger" value="confirm">Confirm</button>
+    </form>
+  </dialog>
+  <p id="toast" class="toast" role="status" aria-atomic="true" hidden></p>
 </body>
 </html>

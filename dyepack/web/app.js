@@ -1,4 +1,4 @@
-// mine map: live from /events or a replay of sample_events.json (index.html?replay=1)
+// Live alerts from /events, or a local replay of sample_events.json.
 const SPEED_ROWS_PER_MIN = 600; // same as schema.py
 const SPEED_FILES_PER_MIN = 30; // same as schema.py
 const TABLE_ROWS = 50000;
@@ -6,27 +6,31 @@ const CANARIES = 200;
 const VEINS = 5;
 const WINDOW = 180; // seconds on the speed chart
 const REPLAY = new URLSearchParams(location.search).has("replay");
-// control token for respond and alert route changes: read once from ?token= then dropped from the address bar
-const TOKEN = (() => {
+// Keep the server's control link out of the address bar and retain access in this tab.
+let controlToken = (() => {
   const q = new URLSearchParams(location.search);
-  const t = q.get("token") || "";
+  let token = q.get("token");
+  try {
+    if (token) sessionStorage.setItem("dyepack.control", token);
+    else if (token === null) token = sessionStorage.getItem("dyepack.control");
+  } catch { /* the link still works when tab storage is unavailable */ }
   if (q.has("token")) {
     q.delete("token");
     const rest = q.toString();
     history.replaceState(null, "", `${location.pathname}${rest ? `?${rest}` : ""}${location.hash}`);
   }
-  return t;
+  return token || "";
 })();
-const ALL = ["status", "chart", "mine", "drive", "feed", "incidents", "score", "prints", "phone"];
+const ALL = ["status", "incidents", "chart", "mine", "drive", "score", "prints", "phone"];
 const RANK = { info: 0, low: 1, high: 2, critical: 3 };
 const ROUTES = { critical: ["push", "sms"], high: ["push"], low: [] };
 const CHANNELS = { push: "Phone push", sms: "SMS", email: "Email", discord: "Discord" };
-// button, done label, feed line
+// Menu label, confirmation, and activity text.
 const ACTIONS = {
-  lock: ["Lock", "Locked", "Locked from the dashboard"],
-  revoke: ["Revoke key", "Key revoked", "Revoked the stolen key"],
-  notify_customers: ["Draft breach notice", "Notice drafted", "Drafted a breach notice"],
-  dismiss: ["Dismiss", "Dismissed", "Marked as a false alarm"],
+  lock: ["Lock access", "Access locked", "Requested an access lock", "Block the associated staff sessions or portal addresses."],
+  revoke: ["Revoke access", "Access revoked", "Revoked access", "Block sign-ins for affected staff accounts or downloads of the associated export."],
+  notify_customers: ["Prepare breach notice", "Notice details ready", "Prepared breach notice details"],
+  dismiss: ["Dismiss incident", "Dismissed", "Dismissed the incident", "Mark the incident as a false alarm and release its session or address locks."],
 };
 // the demo drive from drive.py (no route lists it yet). decoys sort first in their folders
 // like they do on disk. other files show up once they get opened
@@ -104,11 +108,11 @@ const MARKERS = (() => {
 
 const REASONS = {
   canary_touch: (d) => {
-    const n = d.canary_ids?.length || 1;
+    const n = d.canary_count ?? (d.canary_ids?.length || 1);
     return n === 1 ? "Touched a canary customer" : `Touched ${n} canary customers`;
   },
   speed: (d, e) => {
-    const unit = S.procs.has(e.session) ? "files" : "rows";
+    const unit = S.procs.has(e.session) ? "files" : e.session?.startsWith("p-") ? "login attempts" : "rows";
     return d.rate_per_min ? `Tripped the speed alarm at ${fmt(d.rate_per_min)} ${unit} a minute` : "Tripped the speed alarm";
   },
   canary_login: () => "Tried to log in as a canary customer",
@@ -146,9 +150,9 @@ function lockText(e) {
   return `${cap(w)} locked`;
 }
 
-function holdText(e) {
-  if (e.type === "action") return `${ACTIONS[e.detail.action]?.[2] || cap(e.detail.action)} · ${e.detail.incident}`;
-  return e.detail?.what === "ip" ? lockText(e) : `${lockText(e)} · ${who(e)}`;
+function rememberActivity(inc, event) {
+  inc.activity.unshift(event);
+  if (inc.activity.length > 40) inc.activity.pop();
 }
 
 // state
@@ -156,7 +160,7 @@ function holdText(e) {
 let S;
 function fresh() {
   S = {
-    now: 0, rate: 0, ticks: [], seen: 0,
+    now: 0, rate: null, ticks: [], seen: 0,
     phases: {}, phase: null,
     sessions: new Map(), // table readers, each digs a tunnel
     first: new Map(), // session -> first event
@@ -165,10 +169,9 @@ function fresh() {
     folders: new Map(), // drive folder -> {files, sealed}
     reader: null,
     incidents: new Map(), exports: new Map(),
-    feed: [], notes: [], score: {},
+    notes: [], score: {},
     hits: new Set(), flash: [], pings: [], bursts: [], booms: [],
     copies: new Map(), // session -> honey locked exports it downloaded
-    lastHold: null,
     live: { normalAlarms: 0, firstRead: null, exposed: 0 },
     timed: {}, // heist-1 and agent: when the step started, its incident, its time to catch
   };
@@ -192,7 +195,7 @@ function driveFile(name, file) {
 function incident(id = "unknown") {
   if (!S.incidents.has(id)) {
     S.incidents.set(id, {
-      id, alarms: [], sessions: new Set(), severity: "info", alarmAt: null, last: null,
+      id, alarms: [], activity: [], sessions: new Set(), severity: "info", alarmAt: null, last: null,
       heldAt: null, firstHold: null, locked: false, seals: [], notes: [], actions: new Set(),
       report: null, dismissed: false,
     });
@@ -201,9 +204,8 @@ function incident(id = "unknown") {
 }
 
 function hold(inc, e) {
-  inc.heldAt = e.ts;
+  inc.heldAt = Math.max(inc.heldAt ?? e.ts, e.ts);
   inc.firstHold ??= e;
-  S.lastHold = e;
 }
 
 // light up the next k canaries along this reader's tunnel
@@ -293,8 +295,8 @@ function alarm(e, d) {
   const x = S.exports.get(d.export_id);
   if (x && !x.hits) S.booms.push({ at: "crate", id: d.export_id });
   if (x) x.hits++;
-  S.feed.unshift(e);
-  dirty("status", "feed", "mine", "drive", "score", "prints", "incidents");
+  rememberActivity(inc, e);
+  dirty("status", "mine", "drive", "score", "prints", "incidents");
 }
 
 function handle(e) {
@@ -305,10 +307,10 @@ function handle(e) {
   if (e.type === "read" && e.session && !S.firstRead.has(e.session)) S.firstRead.set(e.session, e.ts);
   switch (e.type) {
     case "tick":
-      S.rate = d.reads_per_min || 0;
-      S.ticks.push([e.ts, S.rate]);
+      S.rate = d.reads_per_min ?? null;
+      if (S.rate != null) S.ticks.push([e.ts, S.rate]);
       while (S.ticks.length && S.ticks[0][0] < S.now - WINDOW - 5) S.ticks.shift();
-      dirty("chart", "drive", "phone");
+      dirty("status", "chart", "drive");
       break;
     case "read":
       if (d.process != null || d.files_per_min != null) fileRead(e, d);
@@ -319,12 +321,13 @@ function handle(e) {
       break;
     case "lock": {
       const inc = incident(d.incident);
+      if (e.session) inc.sessions.add(e.session);
       inc.locked = true;
       hold(inc, e);
       const s = S.sessions.get(e.session);
       if (s && (d.what || "session") === "session") s.locked = true;
-      S.feed.unshift(e);
-      dirty("status", "feed", "mine", "incidents");
+      rememberActivity(inc, e);
+      dirty("status", "mine", "incidents");
       break;
     }
     case "burst": {
@@ -336,30 +339,44 @@ function handle(e) {
         f.sealed = true;
         f.lockedAs = file;
       }
-      incident(d.incident).seals.push({ folder: name, ts: e.ts, files: d.files || [] });
+      const inc = incident(d.incident);
+      inc.seals.push({ folder: name, ts: e.ts, files: d.files || [] });
+      if (d.files?.length) hold(inc, e);
       S.bursts.push(name);
-      S.feed.unshift(e);
-      dirty("drive", "feed", "incidents");
+      rememberActivity(inc, e);
+      dirty("status", "drive", "incidents");
       break;
     }
     case "notify":
-      incident(d.incident).notes.push(e);
+      const inc = incident(d.incident);
+      inc.notes.push(e);
+      rememberActivity(inc, e);
       S.notes.unshift(e);
       dirty("phone", "incidents");
       break;
     case "action": {
       const inc = incident(d.incident);
       if (Array.isArray(d.checklist)) inc.checklist = d.checklist;
+      if (d.action === "notify_customers" && Number.isFinite(d.customers)) {
+        inc.notice = { customers: d.customers, plaintext_rows: d.plaintext_rows,
+          locked_copies: d.locked_copies };
+      }
       if (inc.actions.has(d.action)) {
         dirty("incidents"); // already shown, like a click the server echoes back
         break;
       }
       inc.actions.add(d.action);
-      if (d.action === "dismiss") inc.dismissed = true;
-      if (d.action === "lock") inc.locked = true;
-      if (d.action === "lock" || d.action === "revoke") hold(inc, e);
-      S.feed.unshift(e);
-      dirty("status", "feed", "incidents");
+      if (d.action === "dismiss") {
+        inc.dismissed = true;
+        inc.locked = false;
+        for (const sid of inc.sessions) {
+          const s = S.sessions.get(sid);
+          if (s) s.locked = false;
+        }
+      }
+      if (d.action === "revoke" && d.revoked?.length) hold(inc, e);
+      rememberActivity(inc, e);
+      dirty("status", "incidents", "mine");
       break;
     }
     case "export":
@@ -386,7 +403,162 @@ function handle(e) {
       break;
     }
   }
-  if (S.feed.length > 60) S.feed.length = 60;
+}
+
+// The launch overview reads the same events as the alert console.
+const observedIncidents = () => [...S.incidents.values()].filter((inc) => inc.alarms.length);
+let trafficWindow = WINDOW;
+let alertChartKey = "";
+
+function updateView() {
+  const hash = location.hash;
+  const focused = document.activeElement;
+  const alerts = /^#(?:alerts(?:\/|$)|main$)/.test(hash);
+  $("main").hidden = !alerts;
+  $("overview").hidden = alerts;
+  const current = alerts ? $("alerts-link") : $("overview-link");
+  const other = alerts ? $("overview-link") : $("alerts-link");
+  current.setAttribute("aria-current", "page");
+  other.removeAttribute("aria-current");
+  $("skip-view").href = alerts ? "#main" : "#overview";
+  document.title = alerts ? "Alerts | Data Dyepack" : "Data Dyepack";
+  if (alerts) {
+    const id = hash.match(/^#alerts\/(inc-\d+)$/)?.[1];
+    if (id && S.incidents.get(id)?.alarms.length) selectAlert(id, true);
+    else if (id) customSelection = false;
+    else $("main").dataset.detail = "false";
+    if (focused === $("alerts-link") || focused.closest(".containment-chart")) {
+      (matchMedia("(max-width: 700px)").matches && $("main").dataset.detail === "true"
+        ? $("incident-title") : $("alerts-heading")).focus({ preventScroll: true });
+    }
+  } else {
+    drawTraffic();
+    drawAlertCharts(observedIncidents());
+    if (hash === "#activity") $("activity").scrollIntoView({ block: "start" });
+    else if (hash === "#overview" || !hash) window.scrollTo(0, 0);
+  }
+}
+
+function drawTraffic() {
+  const box = $("traffic-chart");
+  const w = box.clientWidth, h = box.clientHeight;
+  if (!w || !h) return;
+  const end = S.now;
+  const start = end - trafficWindow;
+  const samples = S.ticks.filter(([ts]) => ts >= start);
+  const peak = Math.max(0, ...samples.map((sample) => sample[1]));
+  const step = 10 ** Math.floor(Math.log10(Math.max(peak, 100) / 4));
+  const max = Math.ceil(Math.max(peak, 100) / (step * 4)) * step * 4;
+  const left = w < 420 ? 34 : 50, right = w - 12, top = 13, bottom = h - 25;
+  const x = (ts) => left + ((ts - start) / trafficWindow) * (right - left);
+  const y = (v) => bottom - (v / max) * (bottom - top);
+  const root = svg("svg", { width: w, height: h, viewBox: `0 0 ${w} ${h}`, role: "img",
+    "aria-label": `Read speed during the last ${trafficWindow} seconds. ${samples.length ? `Peak ${fmt(peak)} rows per minute.` : "Waiting for samples."}` });
+  const area = svg("linearGradient", { id: "traffic-fill", x2: 0, y2: 1 });
+  area.append(svg("stop", { offset: 0, "stop-color": "#4798d2", "stop-opacity": .30 }),
+    svg("stop", { offset: .78, "stop-color": "#154577", "stop-opacity": .12 }),
+    svg("stop", { offset: 1, "stop-color": "#10243f", "stop-opacity": .02 }));
+  const beam = svg("linearGradient", { id: "traffic-beam", gradientUnits: "userSpaceOnUse",
+    x1: 0, x2: 0, y1: bottom, y2: top });
+  beam.append(svg("stop", { offset: 0, "stop-color": "#8ccfff" }),
+    svg("stop", { offset: .45, "stop-color": "#d8eeff" }),
+    svg("stop", { offset: 1, "stop-color": "#f5f9ff" }));
+  const edge = svg("linearGradient", { id: "traffic-edge", gradientUnits: "userSpaceOnUse",
+    x1: left, x2: right, y1: 0, y2: 0 });
+  edge.append(svg("stop", { offset: 0, "stop-color": "#91b7d8", "stop-opacity": .12 }),
+    svg("stop", { offset: .13, "stop-color": "#91b7d8", "stop-opacity": .36 }),
+    svg("stop", { offset: .55, "stop-color": "#5681a6", "stop-opacity": .21 }),
+    svg("stop", { offset: 1, "stop-color": "#8bafd1", "stop-opacity": .13 }));
+  const defs = svg("defs");
+  defs.append(area, beam, edge);
+  root.append(defs);
+
+  const number = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
+  for (let i = 0; i <= 4; i++) {
+    const v = max * i / 4, yy = y(v);
+    root.append(svg("path", { d: `M${left},${yy}H${right}`, class: "traffic-grid" }),
+      svg("path", { d: `M${left},${yy + 2}H${right}`, class: "traffic-grid-depth" }),
+      svg("text", { x: left - 8, y: yy + 3, "text-anchor": "end", class: "traffic-copy" }, number.format(v)));
+  }
+  for (let i = 0; i <= 3; i++) {
+    const ts = start + (trafficWindow * i / 3);
+    const ago = end - ts;
+    const label = ago === 0 ? "Latest" : ago >= 60 ? `${Math.round(ago / 60)}m ago` : `${Math.round(ago)}s ago`;
+    root.append(svg("text", { x: x(ts), y: h - 5, class: "traffic-copy",
+      "text-anchor": i === 0 ? "start" : i === 3 ? "end" : "middle" }, label));
+  }
+  // A gap in telemetry breaks the trace instead of implying that intervening samples were collected.
+  const runs = [];
+  for (const point of samples) {
+    if (!runs.length || point[0] - runs.at(-1).at(-1)[0] > 4) runs.push([]);
+    runs.at(-1).push(point);
+  }
+  for (const run of runs) {
+    const line = run.map(([ts, val], index) => `${index ? "L" : "M"}${x(ts).toFixed(1)},${y(val).toFixed(1)}`).join("");
+    if (run.length > 1) root.append(svg("path", { d: `${line}L${x(run.at(-1)[0])},${bottom}H${x(run[0][0])}Z`, fill: "url(#traffic-fill)" }),
+      svg("path", { d: line, class: "traffic-glow" }),
+      svg("path", { d: line, class: "traffic-line" }));
+    else root.append(svg("circle", { cx: x(run[0][0]), cy: y(run[0][1]), r: 3, class: "traffic-point" }));
+  }
+
+  const recent = observedIncidents().map((inc) => inc.alarms[0]).filter((alarm) => alarm.ts >= start && alarm.ts <= end);
+  for (const alarm of recent) {
+    const xx = x(alarm.ts);
+    const dot = svg("circle", { cx: xx, cy: bottom - 5, r: 3.3, class: "traffic-alarm" });
+    dot.append(svg("title", {}, `${alertTitle(alarm)} · ${clock(alarm.ts)}`));
+    root.append(svg("line", { x1: xx, x2: xx, y1: top, y2: bottom - 5, class: "traffic-alarm-line" }), dot);
+  }
+  box.replaceChildren(root);
+  $("traffic-rate").textContent = S.rate == null ? "–" : fmt(S.rate);
+  $("traffic-peak").textContent = samples.length ? `Peak ${fmt(peak)} rows/min` : "Waiting for read samples";
+  $("traffic-marker-key").hidden = !recent.length;
+}
+
+function drawAlertCharts(list) {
+  if ($("overview").hidden) return;
+  const key = JSON.stringify(list.map((inc) => [inc.id, inc.severity, inc.firstHold?.ts, inc.dismissed]));
+  if (key === alertChartKey) return;
+  alertChartKey = key;
+  const counts = { critical: 0, high: 0, low: 0 };
+  for (const inc of list) if (inc.severity in counts) counts[inc.severity]++;
+  const labels = Object.entries(counts).flatMap(([severity, count]) => {
+    const dt = el("dt", "", cap(severity));
+    const value = el("span", "severity-value", fmt(count));
+    const bar = el("span", `severity-bar ${severity}`);
+    bar.setAttribute("aria-hidden", "true");
+    bar.style.setProperty("--fraction", `${list.length ? 100 * count / list.length : 0}%`);
+    const track = el("span", "severity-track");
+    track.append(bar);
+    const dd = el("dd");
+    dd.append(track, value);
+    return [dt, dd];
+  });
+  $("severity-chart").replaceChildren(...labels);
+
+  const recent = [...list].sort((a, b) => b.alarms[0].ts - a.alarms[0].ts).slice(0, 5);
+  const durations = recent.map((inc) => inc.firstHold ? Math.max(0, inc.firstHold.ts - inc.alarms[0].ts) : null);
+  const max = Math.max(.001, ...durations);
+  const rows = recent.map((inc, i) => {
+    const row = el("li");
+    const link = el("a", "containment-link", alertTitle(inc.alarms[0]));
+    link.href = `#alerts/${inc.id}`;
+    link.title = `View ${inc.id}`;
+    const elapsed = durations[i];
+    const value = el("span", "containment-value", elapsed == null
+      ? (inc.dismissed ? "Dismissed" : "Open") : dur(elapsed, true));
+    row.append(link, value);
+    if (elapsed != null) {
+      const track = el("span", "containment-track");
+      const bar = el("span", "containment-bar");
+      track.setAttribute("aria-hidden", "true");
+      bar.style.setProperty("--fraction", `${100 * elapsed / max}%`);
+      track.append(bar);
+      row.append(track);
+    }
+    return row;
+  });
+  $("containment-empty").hidden = Boolean(rows.length);
+  $("containment-chart").replaceChildren(...rows);
 }
 
 // drawing, batched so a burst of events paints once
@@ -403,46 +575,28 @@ function flush() {
   const parts = new Set(pending);
   pending.clear();
   const draw = {
-    status: drawStatus, chart: drawChart, mine: drawMine, drive: drawDrive, feed: drawFeed,
+    status: drawStatus, chart: drawChart, mine: drawMine, drive: drawDrive,
     incidents: drawIncidents, score: drawScore, prints: drawPrints, phone: drawPhone,
   };
   for (const p of ALL) if (parts.has(p)) draw[p]();
+  if (parts.has("chart") || parts.has("incidents")) drawTraffic();
 }
 
-const WORDS = { clear: "All clear", alarm: "Alarm", locked: "Locked" };
-let lastMood = "clear";
-
 function drawStatus() {
-  let open = null, held = false, dismissed = false;
-  for (const i of S.incidents.values()) {
-    if (i.dismissed) dismissed = true;
-    else if (i.alarmAt != null && (i.heldAt == null || i.heldAt < i.alarmAt)) {
-      if (!open || i.alarmAt > open.alarmAt) open = i;
-    } else if (i.heldAt != null) held = true;
-  }
-  const m = open ? "alarm" : held ? "locked" : "clear";
-  const box = $("status");
-  box.dataset.state = m;
-  $("status-word").textContent = WORDS[m];
-  let line = !S.seen ? "Waiting for the first events." : dismissed ? "No open alarms." : "No alarms so far.";
-  if (open) line = `${what(open.last)} · ${who(open.last)}`;
-  else if (held && S.lastHold) line = holdText(S.lastHold);
-  $("status-line").textContent = line;
-  document.body.dataset.mood = m;
-  if (m === "alarm" && lastMood !== "alarm") {
-    retrigger(box, "burst");
-    retrigger($("bloom"), "go");
-  }
-  lastMood = m;
-  for (const li of $("phases").children) {
-    const st = S.phases[li.dataset.phase];
-    li.dataset.state = st === "start" ? "now" : st === "end" ? "done" : "";
-  }
+  if ($("empty-alert").hidden) return;
+  const state = $("conn").dataset.state;
+  const offline = state === "retry" || state === "down";
+  const title = offline ? "Connection Lost" : S.seen ? "No Alerts" : "Waiting for Alerts";
+  const message = offline ? "Waiting for the live connection to return."
+    : REPLAY ? "Alerts will appear as the drill plays."
+    : S.seen ? "Canary and decoy alerts will appear here." : "Connecting to Lakeview Fiber.";
+  if ($("empty-title").textContent !== title) $("empty-title").textContent = title;
+  if ($("empty-message").textContent !== message) $("empty-message").textContent = message;
 }
 
 function drawChart() {
   const rate = $("rate");
-  rate.textContent = fmt(S.rate);
+  rate.textContent = S.rate == null ? "–" : fmt(S.rate);
   rate.classList.toggle("over", S.rate > SPEED_ROWS_PER_MIN);
   const box = $("chart");
   const w = box.clientWidth, h = box.clientHeight;
@@ -458,9 +612,10 @@ function drawChart() {
   const limit = y(SPEED_ROWS_PER_MIN);
   const cut = ((limit - T) / ph).toFixed(4);
 
-  const g = svg("svg", { width: w, height: h, viewBox: `0 0 ${w} ${h}`, "aria-hidden": "true" });
+  const g = svg("svg", { width: w, height: h, viewBox: `0 0 ${w} ${h}`, role: "img",
+    "aria-label": `Read speed over three minutes. Threshold: ${SPEED_ROWS_PER_MIN} rows per minute.` });
   const ink = svg("linearGradient", { id: "speed-ink", gradientUnits: "userSpaceOnUse", x1: 0, y1: T, x2: 0, y2: T + ph });
-  for (const [off, c] of [[0, "--dye"], [cut, "--dye"], [cut, "--gold-hi"], [1, "--gold-hi"]]) {
+  for (const [off, c] of [[0, "--dye"], [cut, "--dye"], [cut, "--blue"], [1, "--blue"]]) {
     ink.append(svg("stop", { offset: off, style: `stop-color: var(${c})` }));
   }
   const defs = svg("defs");
@@ -517,7 +672,7 @@ function layoutMine() {
   const w = Math.floor(box.clientWidth);
   if (!w || (M && M.w === w)) return;
   const narrow = w < 560;
-  const h = Math.round(Math.min(360, Math.max(250, w * 0.27)));
+  const h = Math.round(Math.min(290, Math.max(208, w * 0.34)));
   const sy = Math.round(h * 0.24); // ground line
   const sx = narrow ? 22 : 40; // shaft
   const x0 = sx + 16, x1 = w - (narrow ? 10 : 20);
@@ -567,7 +722,7 @@ function layoutMine() {
     svg("path", { d: `M0,${sy}H${w}`, class: "ground" }),
     svg("path", { d: `M${sx - 13},${sy}L${sx},${top}L${sx + 13},${sy}M${sx - 7},${sy - 13}H${sx + 7}M${sx},${top}V${sy}`, class: "headframe" }),
     svg("circle", { cx: sx, cy: top, r: narrow ? 5 : 7, class: "headframe" }),
-    svg("text", { x: w - (narrow ? 10 : 20), y: narrow ? 18 : 26, "text-anchor": "end", class: "sky-label" }, `${fmt(TABLE_ROWS)} customers · ${CANARIES} canaries`),
+    svg("text", { x: w - (narrow ? 10 : 20), y: narrow ? 18 : 26, "text-anchor": "end", class: "sky-label" }, "Illustrative map"),
     crateLayer,
   );
   M = { w, sy, sx, x0, x1, narrow, pt, vein, root, tunnels, marks, crateLayer, crates: new Map(), cratePos: new Map() };
@@ -721,12 +876,12 @@ function drawDrive() {
   }
   const p = S.procs.get(S.reader);
   const idle = !p || S.now - p.lastTs > 10;
-  $("proc-name").textContent = p ? who({ session: S.reader }) : "Nobody yet";
-  $("proc-last").textContent = p ? `Last file: ${folderOf(p.last)}/${fileName(p.last)}` : "Every file open on the drive shows up here.";
+  $("proc-name").textContent = p ? who({ session: S.reader }) : "No activity yet";
+  $("proc-last").textContent = p ? `Last file: ${folderOf(p.last)}/${fileName(p.last)}` : "";
   const fpm = $("proc-fpm");
   fpm.textContent = fmt(idle ? 0 : p.fpm);
   fpm.classList.toggle("over", !idle && p.fpm > SPEED_FILES_PER_MIN);
-  $("proc-unit").textContent = p && idle ? `files a minute now, peak ${fmt(p.peak)}` : "files a minute";
+  $("proc-unit").textContent = p && idle ? `files/min · peak ${fmt(p.peak)}` : "files/min";
   const pace = $("proc-pace");
   pace.hidden = !p;
   if (p) {
@@ -736,100 +891,179 @@ function drawDrive() {
   }
 }
 
-let topSeen = null;
+const ALERT_TITLES = {
+  canary_touch: "Canary record accessed",
+  canary_login: "Canary sign-in attempt",
+  canary_contact: "Canary contacted",
+  unknown_account_login: "Unknown account sign-in",
+  decoy_open: "Decoy file opened",
+  speed: "Unusual access speed",
+};
+const alertTitle = (e) => ALERT_TITLES[e.detail?.reason] || what(e);
+const alertTime = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const alertDate = (ts) => new Date(ts * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
+const alertRows = new Map();
+let selectedAlert = null;
+let renderedAlert = null;
+let customSelection = false;
 
-function drawFeed() {
-  const list = $("feed");
-  list.replaceChildren(...S.feed.slice(0, 40).map(feedItem));
-  if (S.feed[0] && S.feed[0] !== topSeen) list.firstChild.classList.add("new");
-  topSeen = S.feed[0] || null;
-  $("feed-empty").hidden = S.feed.length > 0;
+function severityDot(severity) {
+  const dot = el("span", `severity-dot ${severity}`);
+  dot.setAttribute("aria-hidden", "true");
+  return dot;
 }
 
-function feedItem(e) {
-  const d = e.detail || {};
-  const kind = { lock: "lock", burst: "sealed", action: "action" }[e.type] || e.severity || "info";
-  const li = el("li", `item ${kind}`);
-  const top = el("div", "item-top");
-  top.append(el("span", `chip ${kind}`, { lock: "Locked", sealed: "Burst", action: "Response" }[kind] || kind), el("span", "inc", d.incident || ""), el("time", "", clock(e.ts)));
-  li.append(top);
-  if (e.type === "burst") {
-    const files = d.files || [], n = files.length, where = fileName(d.folder);
-    li.append(
-      el("p", "what", n === 1 ? `Locked ${files[0]} in place` : n ? `Locked ${n} customer files in place` : `Burst in the ${where} folder`),
-      el("p", "why", n ? `The customer data in ${where}/ stays where it was, locked. One command unlocks it.` : "No customer files in that folder needed locking."),
-    );
-  } else if (e.type === "action") {
-    li.append(el("p", "what", ACTIONS[d.action]?.[2] || cap(d.action)), el("p", "who", `by ${e.actor || "someone"}`));
-  } else if (e.type === "lock") {
-    li.append(el("p", "what", lockText(e)), el("p", "who", who(e)));
-  } else {
-    li.append(el("p", "what", what(e)));
-    const note = why(e);
-    if (note) li.append(el("p", "why", note));
-    li.append(el("p", "who", who(e)));
+function selectAlert(id, openDetail) {
+  if (selectedAlert !== id) $("toast").hidden = true;
+  selectedAlert = id;
+  customSelection = true;
+  if (openDetail) $("main").dataset.detail = "true";
+  drawIncidents();
+  if (openDetail && matchMedia("(max-width: 700px)").matches) $("incident-title").focus();
+}
+
+function alertRow(inc, active) {
+  let row = alertRows.get(inc.id);
+  if (!row) {
+    row = el("li");
+    const button = el("button", "alert-row");
+    button.type = "button";
+    button.dataset.incident = inc.id;
+    const arrow = svg("svg", { class: "icon", "aria-hidden": "true" });
+    arrow.append(svg("use", { href: "#i-chevron" }));
+    button.append(severityDot(inc.severity), el("span", "row-title"), el("time", "row-time"),
+      el("span", "row-meta"), el("span", "row-source"), arrow);
+    button.addEventListener("click", () => selectAlert(inc.id, true));
+    row.append(button);
+    alertRows.set(inc.id, row);
   }
-  return li;
+  const button = row.firstChild;
+  const headline = inc.last || inc.alarms[0];
+  const date = new Date(headline.ts * 1000);
+  button.firstChild.className = `severity-dot ${inc.severity}`;
+  button.setAttribute("aria-current", String(active));
+  button.querySelector(".row-title").textContent = alertTitle(headline);
+  button.querySelector(".row-meta").textContent = `${cap(inc.severity)} · ${stateOf(inc)}`;
+  button.querySelector(".row-source").textContent = who(headline);
+  const time = button.querySelector("time");
+  time.dateTime = date.toISOString();
+  time.title = date.toLocaleString();
+  time.textContent = date.toDateString() === new Date(S.now * 1000).toDateString()
+    ? alertTime(headline.ts) : alertDate(headline.ts);
+  return row;
 }
-
-// incidents: triage card, report and respond buttons for each one
-
-const unfolded = new Set();
 
 function drawIncidents() {
-  const box = $("incidents");
-  const list = [...S.incidents.values()].filter((i) => i.alarms.length).sort((a, b) => b.alarms[0].ts - a.alarms[0].ts);
-  const focus = document.activeElement?.dataset?.key;
-  if (!list.length) {
-    box.replaceChildren(el("p", "empty", "No incidents yet. When an alarm fires, its triage, report and response buttons show up here."));
-    return;
+  const list = observedIncidents();
+  const open = (inc) => Number(stateOf(inc) === "Open");
+  list.sort((a, b) => open(b) - open(a) || b.alarms.at(-1).ts - a.alarms.at(-1).ts);
+  const requestedAlert = location.hash.match(/^#alerts\/(inc-\d+)$/)?.[1];
+  if (requestedAlert && !customSelection && list.some((inc) => inc.id === requestedAlert)) {
+    selectedAlert = requestedAlert;
+    customSelection = true;
+    $("main").dataset.detail = "true";
   }
-  box.replaceChildren(...list.map((inc, k) => (k ? folded(inc) : incidentCard(inc))));
-  if (focus) box.querySelector(`[data-key="${CSS.escape(focus)}"]`)?.focus();
+  if (!customSelection) selectedAlert = list[0]?.id ?? null;
+  const inc = S.incidents.get(selectedAlert);
+  const rows = list.map((item) => alertRow(item, item.id === selectedAlert));
+  const listElement = $("alert-list");
+  if (listElement.children.length !== rows.length || rows.some((row, i) => listElement.children[i] !== row)) {
+    const focus = document.activeElement;
+    listElement.replaceChildren(...rows);
+    if (listElement.contains(focus)) focus.focus({ preventScroll: true });
+  }
+  $("main").dataset.hasAlerts = String(Boolean(inc));
+  const openCount = list.filter(open).length;
+  $("alert-count").textContent = list.length ? `Lakeview Fiber · ${openCount} open` : "Lakeview Fiber";
+  const counter = $("nav-alert-count");
+  counter.hidden = !openCount;
+  counter.textContent = fmt(openCount);
+  drawAlertCharts(list);
+  $("incident").hidden = !inc;
+  $("empty-alert").hidden = Boolean(inc);
+  if (!inc) return drawStatus();
+
+  if (renderedAlert !== inc.id) {
+    $("alert-pane").querySelector(".reading-pane").scrollTop = 0;
+    $("actions").open = false;
+    $("incident-report").open = false;
+    $("incident-activity").open = false;
+    renderedAlert = inc.id;
+  }
+  const alarm = inc.last || inc.alarms[0];
+  $("incident-meta").replaceChildren(severityDot(inc.severity), `${cap(inc.severity)} · ${stateOf(inc)}`, ` · ${inc.id}`);
+  $("incident-title").textContent = alertTitle(alarm);
+  $("incident-source").textContent = who(alarm);
+  const time = $("incident-time");
+  time.dateTime = new Date(alarm.ts * 1000).toISOString();
+  time.textContent = `${alertDate(alarm.ts)} at ${alertTime(alarm.ts)}`;
+  $("incident-summary").textContent = happened(inc);
+  $("incident-facts").replaceChildren(triage(inc));
+  const outcome = $("incident-outcome");
+  const key = JSON.stringify([inc.id, inc.notice, inc.checklist]);
+  if (outcome.dataset.key !== key) {
+    outcome.replaceChildren();
+    appendOutcome(outcome, inc);
+    outcome.dataset.key = key;
+  }
+  const report = $("incident-report");
+  report.hidden = !inc.report;
+  if (report.open && inc.report) $("report-body").replaceChildren(reportBlock(inc));
+  const activity = $("incident-activity");
+  $("activity-count").textContent = fmt(inc.activity.length);
+  if (activity.open) $("incident-events").replaceChildren(...inc.activity.map(activityItem));
+  drawActions(inc);
 }
 
-function incidentCard(inc) {
-  const card = el("article", `incident${inc.dismissed ? " dismissed" : ""}`);
-  const head = el("div", "inc-head");
-  head.append(el("span", `chip ${inc.severity}`, inc.severity), el("strong", "", inc.id), el("span", "inc-state", stateOf(inc)));
-  card.append(head, triage(inc), reportBlock(inc), respond(inc));
-  if (inc.checklist) card.append(checklistCard(inc));
-  return card;
-}
-
-function folded(inc) {
-  const det = el("details", `incident${inc.dismissed ? " dismissed" : ""}`);
-  det.open = unfolded.has(inc.id);
-  det.addEventListener("toggle", () => (det.open ? unfolded.add(inc.id) : unfolded.delete(inc.id)));
-  const title = inc.report?.title || what(inc.last || inc.alarms[0]);
-  det.append(el("summary", "", `${inc.id} · ${title} · ${stateOf(inc)}`), triage(inc), reportBlock(inc), respond(inc));
-  if (inc.checklist) det.append(checklistCard(inc));
-  return det;
+function activityItem(e) {
+  const d = e.detail || {};
+  const item = el("li", "activity");
+  let label = what(e), meta = who(e);
+  if (e.type === "alarm") meta = [meta, why(e)].filter(Boolean).join(" · ");
+  else if (e.type === "lock") label = lockText(e);
+  else if (e.type === "action") label = ACTIONS[d.action]?.[2] || cap(d.action);
+  else if (e.type === "notify") {
+    label = `${CHANNELS[d.channel] || d.channel} · ${d.status}`;
+    meta = d.summary;
+  } else if (e.type === "burst") {
+    label = `Locked ${fmt(d.files?.length || 0)} files in ${fileName(d.folder)}`;
+    meta = d.files?.join(", ");
+  }
+  const time = el("time", "", clock(e.ts));
+  time.dateTime = new Date(e.ts * 1000).toISOString();
+  item.append(el("p", "", label), time);
+  if (meta) item.append(el("p", "event-meta", meta));
+  return item;
 }
 
 function stateOf(inc) {
   if (inc.dismissed) return "False alarm";
-  if (inc.alarmAt != null && (inc.heldAt == null || inc.heldAt < inc.alarmAt)) return "Open";
+  const alarmAt = inc.alarmAt ?? inc.alarms[0]?.ts;
+  if (alarmAt != null && (inc.heldAt == null || inc.heldAt < alarmAt)) return "Open";
   if (inc.heldAt != null) return "Contained";
   return "Logged";
 }
 
+function appendOutcome(card, inc) {
+  if (inc.notice?.customers != null) {
+    const { customers, plaintext_rows: rows, locked_copies: copies } = inc.notice;
+    const noun = customers === 1 ? "customer" : "customers";
+    card.append(el("p", "estimate", `${fmt(customers)} potentially affected ${noun}`));
+    if (Number.isFinite(rows)) card.append(el("p", "estimate", `${fmt(rows)} plaintext rows exposed`));
+    if (copies?.length) card.append(el("p", "estimate", `Locked copies: ${copies.join(", ")}`));
+  }
+  if (inc.checklist) card.append(checklistCard(inc));
+}
+
 function triage(inc) {
-  const r = inc.report;
   const first = inc.alarms.find(serious) || inc.alarms[0];
-  const box = el("div", "triage");
   const facts = el("dl", "facts");
   const add = (k, v, cls) => v && facts.append(el("dt", "", k), el("dd", cls || "", v));
-  add("What happened", happened(inc));
-  add("How fast", howFast(inc, first));
-  const [pace, cls] = paceOf(inc);
-  add("Script or person", pace, cls);
-  add("Real data exposed", exposure(inc));
-  add("Locked in place", inc.seals.map((x) => (x.files.length ? x.files.map((f) => `${x.folder}/${f}`).join(", ") : `${x.folder}/`)).join(", "));
-  add("Next step", r ? nextStep(r.text) : "Waiting for the report.");
-  add("Alerts sent", [...new Map(inc.notes.map((n) => [n.detail.channel, n.detail.status]))].map(([c, st]) => `${CHANNELS[c] || c} ${st}`).join(" · "));
-  box.append(el("p", "triage-title", r?.source === "databricks" ? "AI triage" : "Triage"), facts);
-  return box;
+  add("Exposure", exposure(inc));
+  add("Detection", howFast(inc, first));
+  add("Locked files", inc.seals.flatMap((seal) => seal.files.map((file) => `${seal.folder}/${file}`)).join(", "));
+  if (inc.report) add("Next step", nextStep(inc.report.text));
+  return facts;
 }
 
 // the whole incident in one line, no per alarm speeds (the pace line has the peak)
@@ -848,7 +1082,7 @@ function happened(inc) {
       // every canary read counts, not just the ones an alarm listed
       let k = 0;
       for (const sid of inc.sessions) k += S.sessions.get(sid)?.canaries || 0;
-      k ||= new Set(list.flatMap((a) => a.detail.canary_ids || [])).size || n;
+      k = Math.max(k, list.reduce((sum, a) => sum + (a.detail.canary_count ?? a.detail.canary_ids?.length ?? 0), 0)) || n;
       return `touched ${count(k, "a canary customer", "canary customers")}`;
     }
     if (r === "canary_login") return `used ${count(n, "a canary login", "canary logins")}`;
@@ -864,14 +1098,23 @@ function happened(inc) {
 
 // the breach notice checklist from a notify_customers action. drafted only, nothing gets sent
 function checklistCard(inc) {
-  const box = el("div", "triage");
-  const facts = el("dl", "facts");
+  const box = el("div", "checklist-panel");
+  const items = el("ul", "checklist");
+  box.append(el("p", "checklist-title", "Breach notice checklist"));
   for (const it of inc.checklist) {
     const item = it && typeof it === "object" ? it : { step: it };
+    const text = String(item.step ?? item.text ?? item.task ?? item.title ?? "");
+    if (!text) continue;
+    if (text === "Lab guidance, not legal advice") {
+      box.append(el("p", "checklist-note", text));
+      continue;
+    }
     const due = item.due ?? item.by ?? item.date ?? item.deadline;
-    facts.append(el("dt", "", due != null ? dateText(due) : "To do"), el("dd", "", String(item.step ?? item.text ?? item.task ?? item.title ?? "")));
+    const line = el("li", "", text);
+    if (due != null) line.append(el("span", "checklist-note", ` · ${dateText(due)}`));
+    items.append(line);
   }
-  box.append(el("p", "triage-title", "Breach notice checklist"), el("p", "empty", "Lab guidance, not legal advice"), facts);
+  box.append(items);
   return box;
 }
 
@@ -890,25 +1133,6 @@ function howFast(inc, first) {
   if (inc.seals[0]) out += `, files locked ${later(inc.seals[0].ts - first.ts)}`;
   if (inc.firstHold) out += `, ${inc.firstHold.type === "lock" ? "locked" : "contained"} ${later(inc.firstHold.ts - first.ts)}`;
   return `${out}.`;
-}
-
-function paceOf(inc) {
-  let rows = 0, files = 0;
-  for (const a of inc.alarms) {
-    const r = a.detail?.rate_per_min || 0;
-    if (S.procs.has(a.session)) files = Math.max(files, r);
-    else rows = Math.max(rows, r);
-  }
-  for (const s of inc.sessions) files = Math.max(files, S.procs.get(s)?.peak || 0);
-  const speed = rows ? `peak ${fmt(rows)} rows a minute` : files ? `peak ${fmt(files)} files a minute` : "";
-  const fast = rows > SPEED_ROWS_PER_MIN || files > SPEED_FILES_PER_MIN;
-  const looks = inc.report?.looks_like || (speed ? (fast ? "ai_agent" : "person") : null);
-  if (!looks) return [null];
-  const agent = looks === "ai_agent";
-  let text = agent ? "Likely a script or AI agent" : "Likely a person";
-  if (speed && fast) text = agent ? "Machine speed: a script or AI agent" : "Machine speed. The report still says a person";
-  if (speed && !fast) text = agent ? "Human speed. The report still says a script or AI agent" : "Human speed: likely a person";
-  return [speed ? `${text} (${speed})` : text, agent ? "machine" : "human"];
 }
 
 function exposure(inc) {
@@ -943,75 +1167,131 @@ function nextStep(text) {
 
 function reportBlock(inc) {
   const r = inc.report;
-  if (!r) return el("p", "empty", "The report is on its way.");
   const box = el("div", "report");
-  const meta = el("div", "meta");
-  const db = r.source === "databricks";
-  meta.append(el("span", `chip ${db ? "src-databricks" : "src-template"}`, db ? "Databricks model" : "Template"), el("span", "", `Report · ${clock(r.ts)}`));
-  box.append(meta, el("h3", "", r.title || "Incident report"), el("p", "", r.text || ""));
+  const source = r.source === "databricks" ? "Databricks" : "Template";
+  box.append(el("p", "report-meta", `${source} · ${clock(r.ts)}`), el("p", "", r.text || ""));
   return box;
 }
 
-// buttons live across redraws so a click mid attack still lands
-const bars = new Map();
 const sending = new Set();
+const confirmDialog = $("confirm-action");
+let confirmation = null;
 
-function respond(inc) {
-  let bar = bars.get(inc.id);
-  if (!bar) {
-    bar = el("div", "respond");
-    for (const [action, [label]] of Object.entries(ACTIONS)) {
-      const b = el("button", `act ${action}`, label);
-      b.type = "button";
-      b.dataset.key = `${inc.id}:${action}`;
-      b.dataset.action = action;
-      b.addEventListener("click", () => act(inc.id, action));
-      bar.append(b);
-    }
-    bars.set(inc.id, bar);
-  }
-  const suggested = new Set(inc.report?.actions || []);
-  for (const b of bar.children) {
-    const action = b.dataset.action;
-    const did = inc.actions.has(action) || (action === "lock" && inc.locked);
-    const hint = suggested.has(action) && !did;
-    b.textContent = ACTIONS[action][did ? 1 : 0];
-    b.disabled = did || inc.dismissed || sending.has(b.dataset.key);
-    b.classList.toggle("done", did);
-    b.classList.toggle("suggested", hint);
-    b.title = hint ? "The report suggests this" : "";
-  }
-  return bar;
+function canRespond(inc, action) {
+  if (inc.dismissed || inc.actions.has(action)) return false;
+  if (action === "lock") return !inc.locked && [...inc.sessions].some((sid) => /^(s|job|p)-/.test(sid));
+  if (action === "revoke") return inc.alarms.some((a) => a.detail?.export_id)
+    || [...inc.sessions].some((sid) => /^(s|job)-/.test(sid));
+  return true;
 }
+
+function drawActions(inc) {
+  const actions = $("actions");
+  const canEdit = REPLAY || (controlToken && $("conn").dataset.state === "live");
+  const options = Object.keys(ACTIONS).filter((action) => canRespond(inc, action));
+  actions.hidden = !options.length || !canEdit;
+  const note = $("response-note");
+  note.hidden = !options.length || Boolean(canEdit);
+  note.textContent = controlToken ? "Response controls will be available when the live connection returns."
+    : "Read only. Open the server’s control link to respond.";
+  for (const button of $("action-items").children) {
+    const action = button.dataset.action;
+    button.hidden = !options.includes(action);
+    button.disabled = sending.has(inc.id);
+  }
+  if (actions.hidden) actions.open = false;
+}
+
+function requestAction(id, action) {
+  if (!ACTIONS[action][3]) return act(id, action);
+  confirmation = { id, action };
+  $("confirm-title").textContent = `${ACTIONS[action][0]}?`;
+  $("confirm-detail").textContent = `${id} · ${ACTIONS[action][3]}${REPLAY ? " This change applies to the replay only." : ""}`;
+  $("confirm-button").textContent = ACTIONS[action][0];
+  confirmDialog.showModal();
+}
+
+function finishConfirmation(confirmed) {
+  const pendingAction = confirmation;
+  confirmation = null;
+  confirmDialog.close();
+  if (!pendingAction) return;
+  const { id, action } = pendingAction;
+  if (confirmed) act(id, action);
+  else $("actions").querySelector("summary").focus();
+}
+
+confirmDialog.querySelector("form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  finishConfirmation(event.submitter?.value === "confirm");
+});
+confirmDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  finishConfirmation(false);
+});
 
 function post(path, body) {
   const headers = { "Content-Type": "application/json" };
-  if (TOKEN) headers["X-Dyepack-Token"] = TOKEN;
+  if (controlToken) headers["X-Dyepack-Token"] = controlToken;
   return fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
 }
 
-const refused = (r) => r.status === 401 || r.status === 403;
-const TOKEN_HELP = "The server turned this down. Open the map with its control token link.";
+const TOKEN_HELP = "Open the control link printed by dyepack serve to make live changes.";
+
+async function actionResult(response) {
+  if (response.status === 401) {
+    controlToken = "";
+    try { sessionStorage.removeItem("dyepack.control"); } catch { /* no stored token */ }
+    drawRoutes();
+    if (routesLoaded) $("routes-note").textContent = TOKEN_HELP;
+    setConn($("conn").dataset.state);
+    throw new Error(TOKEN_HELP);
+  }
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error ? cap(result.error) + "." : `Request failed (HTTP ${response.status}).`);
+  return result;
+}
 
 async function act(id, action) {
-  const e = { ts: S.now, type: "action", session: "dashboard", actor: "you", ip: "", severity: "info", detail: { incident: id, action } };
-  if (REPLAY) return handle(e);
-  const key = `${id}:${action}`;
-  sending.add(key);
+  const inc = S.incidents.get(id);
+  if (!inc || !canRespond(inc, action) || sending.has(id)) return;
+  if (!REPLAY && !controlToken) return toast(TOKEN_HELP);
+  if (!REPLAY && $("conn").dataset.state !== "live") return toast("Wait for the live stream to reconnect.");
+  const detail = { incident: id, action };
+  const e = { ts: S.now, type: "action", session: "dashboard", actor: "you", ip: "", severity: "info", detail };
+  if (REPLAY) {
+    const exportId = inc.alarms.find((a) => a.detail?.export_id)?.detail.export_id;
+    const copy = S.exports.get(exportId);
+    if (action === "notify_customers") {
+      detail.plaintext_rows = [...inc.sessions].reduce((sum, sid) => {
+        const s = S.sessions.get(sid);
+        return sum + (s ? Math.max(0, s.rows - s.canaries) : 0);
+      }, 0);
+      detail.customers = copy ? Math.max(0, copy.rows - copy.canaries) : detail.plaintext_rows;
+      detail.locked_copies = [exportId, ...inc.seals.flatMap((seal) => seal.files.map((f) => `${seal.folder}/${f}`))].filter(Boolean);
+      detail.checklist = ["Verify the affected records and preserve the incident report.", "Review notification requirements with your response team."];
+    }
+    if (action === "lock") {
+      const alarm = inc.alarms.find((a) => /^(s|job|p)-/.test(a.session));
+      handle({ ...alarm, ts: S.now, type: "lock",
+        detail: { incident: id, what: alarm.session.startsWith("p-") ? "ip" : "session" } });
+    }
+    if (action === "revoke") detail.revoked = [exportId || inc.id];
+    handle(e);
+    return toast(`${ACTIONS[action][1]} in replay.`);
+  }
+  sending.add(id);
   dirty("incidents");
   try {
-    const r = await post("/api/respond", { incident: id, action });
-    if (refused(r)) throw new Error(TOKEN_HELP);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const back = await r.json().catch(() => ({}));
-    const list = back?.checklist ?? back?.detail?.checklist;
-    if (Array.isArray(list)) e.detail.checklist = list;
-    handle(e);
+    const back = await actionResult(await post("/api/respond", detail));
+    handle({ ...e, detail: { ...detail, ...back, checklist: back.checklist ?? back.detail?.checklist } });
+    toast(`${ACTIONS[action][1]}.`);
   } catch (err) {
-    toast(err.message === TOKEN_HELP ? TOKEN_HELP : "Couldn't reach the server. Nothing changed. Try again.");
+    toast(err instanceof TypeError ? "Couldn’t confirm the response. Check Activity before trying again." : err.message);
+  } finally {
+    sending.delete(id);
+    dirty("incidents");
   }
-  sending.delete(key);
-  dirty("incidents");
 }
 
 // the on-call phone shows the last few alerts
@@ -1019,9 +1299,6 @@ async function act(id, action) {
 let phoneTop = null;
 
 function drawPhone() {
-  const when = new Date((S.now || Date.now() / 1000) * 1000);
-  $("phone-time").textContent = when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).replace(/\s?[AP]M$/i, "");
-  $("phone-date").textContent = when.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
   const list = $("phone-notes");
   list.replaceChildren(...S.notes.slice(0, 3).map(noteCard));
   if (S.notes[0] && S.notes[0] !== phoneTop) list.firstChild.classList.add("new");
@@ -1051,6 +1328,12 @@ function noteCard(e) {
 // alert routes: which channels each severity goes to
 
 let routes = structuredClone(ROUTES);
+let routesLoaded = REPLAY;
+let savingRoutes = false;
+
+function routeHint(text) {
+  $("routes-note").textContent = !REPLAY && !controlToken ? TOKEN_HELP : text;
+}
 
 function buildRoutes() {
   const body = $("routes-body");
@@ -1063,6 +1346,7 @@ function buildRoutes() {
     for (const [ch, name] of Object.entries(CHANNELS)) {
       const td = el("td"), label = el("label", "switch"), box = el("input");
       box.type = "checkbox";
+      box.setAttribute("role", "switch");
       box.dataset.route = `${sev}:${ch}`;
       box.setAttribute("aria-label", `${cap(sev)} alarms by ${name}`);
       box.addEventListener("change", () => saveRoute(box));
@@ -1078,45 +1362,66 @@ function drawRoutes() {
   for (const box of document.querySelectorAll("[data-route]")) {
     const [sev, ch] = box.dataset.route.split(":");
     box.checked = Array.isArray(routes[sev]) && routes[sev].includes(ch);
+    box.disabled = !routesLoaded || savingRoutes || (!REPLAY && !controlToken);
   }
 }
 
 async function loadRoutes() {
   const note = $("routes-note");
   if (REPLAY) {
-    note.textContent = "In the replay, changes stay on this page.";
+    note.textContent = "These settings apply to the replay only.";
     return drawRoutes();
   }
+  const retry = $("retry-routes");
+  retry.disabled = true;
+  routesLoaded = false;
+  note.textContent = "Loading alert routes…";
+  drawRoutes();
   try {
     const r = await fetch("/api/alert-routes");
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const got = await r.json();
     if (!got || typeof got !== "object" || Array.isArray(got)) throw new Error("bad routes");
     routes = { ...structuredClone(ROUTES), ...got };
-    note.textContent = "Loaded from the server. Changes save right away.";
+    routesLoaded = true;
+    retry.hidden = true;
+    routeHint("Changes save automatically.");
   } catch {
-    note.textContent = "Couldn't load the saved routes. Showing the defaults.";
+    note.textContent = "Couldn’t load the saved routes.";
+    retry.hidden = false;
+  } finally {
+    retry.disabled = false;
+    drawRoutes();
   }
-  drawRoutes();
 }
 
 async function saveRoute(box) {
+  if (!routesLoaded || savingRoutes || (!REPLAY && !controlToken)) return drawRoutes();
   const [sev, ch] = box.dataset.route.split(":");
   const before = structuredClone(routes);
   const on = new Set(routes[sev] || []);
   if (box.checked) on.add(ch);
   else on.delete(ch);
   routes[sev] = Object.keys(CHANNELS).filter((c) => on.has(c));
-  if (REPLAY) return;
+  if (REPLAY) {
+    $("routes-note").textContent = "Updated for this replay.";
+    return;
+  }
+  const restoreFocus = document.activeElement === box;
+  savingRoutes = true;
+  $("routes-note").textContent = "Saving alert routes…";
+  drawRoutes();
   try {
-    const r = await post("/api/alert-routes", routes);
-    if (refused(r)) throw new Error(TOKEN_HELP);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    $("routes-note").textContent = "Saved.";
+    routes = await actionResult(await post("/api/alert-routes", routes));
+    routeHint("Alert routes saved.");
   } catch (err) {
     routes = before;
+    routeHint("Save failed. Try changing the route again.");
+    toast(err instanceof TypeError ? "Couldn’t save the alert routes." : err.message);
+  } finally {
+    savingRoutes = false;
     drawRoutes();
-    toast(err.message === TOKEN_HELP ? TOKEN_HELP : "Couldn't save the alert routes. Is the server running?");
+    if (restoreFocus && document.activeElement === document.body) box.focus({ preventScroll: true });
   }
 }
 
@@ -1149,7 +1454,7 @@ function tileText(key, v) {
     case "detect_seconds":
       return [dur(v, true, true), "Goal: 10 s or less", v <= 10 ? "pass" : "fail"];
     case "rows_exposed":
-      return [fmt(v), `${((100 * v) / TABLE_ROWS).toFixed(1)}% of the table before the lock`, ""];
+      return [fmt(v), "Rows read before containment", ""];
     case "guesses_cracked":
       return [fmt(v), "The thief can't tell which list is real", ""];
     case "ai_pick": {
@@ -1169,7 +1474,7 @@ function drawScore() {
   for (const tile of document.querySelectorAll(".tile")) {
     const key = tile.id.slice(2);
     const v = scoreValue(key);
-    const [value, note, verdict] = v == null ? ["Not yet", tile.dataset.note, ""] : tileText(key, v);
+    const [value, note, verdict] = v == null ? ["Pending", tile.dataset.note, ""] : tileText(key, v);
     const big = tile.querySelector(".v");
     if (v != null && big.classList.contains("wait")) retrigger(tile, "pop");
     big.textContent = value;
@@ -1184,7 +1489,7 @@ function drawPrints() {
     const li = el("li", x.hits ? "print leaked" : "print");
     const top = el("div", "print-top");
     top.append(el("strong", "", id), el("span", `chip ${x.hits ? "leaked" : "clean"}`, x.hits ? "Leaked" : "No use seen"));
-    li.append(top, el("p", "", `${fmt(x.rows || 0)} rows with ${fmt(x.canaries || 0)} canaries of its own`), el("p", "who", `Made by ${x.actor} at ${clock(x.ts)}`));
+    li.append(top, el("p", "", `${fmt(x.rows || 0)} rows · ${fmt(x.canaries || 0)} canaries`), el("p", "who", `Created by ${x.actor} at ${clock(x.ts)}`));
     if (x.hits) li.append(el("p", "trace", `${x.hits} ${x.hits === 1 ? "alarm points" : "alarms point"} to this copy`));
     return li;
   });
@@ -1197,10 +1502,13 @@ function drawPrints() {
 const CONN = { connecting: "Connecting", live: "Live", retry: "Reconnecting", down: "Not connected", replay: "Replay" };
 
 function setConn(state) {
-  const c = $("conn");
-  c.dataset.state = state;
-  c.textContent = CONN[state];
-  $("conn-note").hidden = state !== "retry" && state !== "down";
+  for (const id of ["conn", "mobile-conn", "overview-conn"]) {
+    const indicator = $(id);
+    indicator.dataset.state = state;
+    indicator.textContent = CONN[state];
+  }
+  drawStatus();
+  dirty("incidents");
 }
 
 function live() {
@@ -1224,25 +1532,40 @@ async function replay() {
   $("player").hidden = false;
   let events = [];
   try {
-    events = await (await fetch("sample_events.json")).json();
+    const response = await fetch("sample_events.json");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    events = await response.json();
+    if (!Array.isArray(events) || !events.length) throw new Error("Empty recording");
   } catch {
-    $("clock").textContent = "Couldn't load the recording";
+    $("clock").textContent = "Couldn’t load the recording";
+    $("restart").disabled = false;
+    $("restart").onclick = () => location.reload();
+    $("restart").textContent = "Retry";
     return;
   }
-  if (!events.length) return;
   // "at" is when an event plays in replay seconds. quiet stretches go faster, ts stays real
   const t0 = Math.min(...events.map((e) => e.ts));
   const when = (e) => e.at ?? e.ts - t0;
   events.sort((a, b) => when(a) - when(b));
   const total = when(events.at(-1));
   const play = $("play");
+  const speedSelect = $("replay-speed");
+  for (const control of [play, $("restart"), speedSelect]) control.disabled = false;
   let i = 0, at = 0, speed = 1, playing = true, last = performance.now();
   const label = () => (play.textContent = i >= events.length ? "Play again" : playing ? "Pause" : "Play");
+  const updateClock = () => ($("clock").textContent = `${mmss(at)} / ${mmss(total)}`);
   const restart = () => {
     fresh();
+    alertRows.clear();
+    selectedAlert = renderedAlert = null;
+    customSelection = false;
+    $("main").dataset.detail = "false";
+    if (confirmDialog.open) finishConfirmation(false);
     i = 0;
     at = 0;
+    last = performance.now();
     playing = true;
+    updateClock();
     dirty(...ALL);
   };
   play.onclick = () => {
@@ -1254,12 +1577,7 @@ async function replay() {
     restart();
     label();
   };
-  for (const b of document.querySelectorAll("[data-speed]")) {
-    b.onclick = () => {
-      speed = Number(b.dataset.speed);
-      for (const o of document.querySelectorAll("[data-speed]")) o.setAttribute("aria-pressed", String(o === b));
-    };
-  }
+  speedSelect.onchange = () => (speed = Number(speedSelect.value));
   setInterval(() => {
     const now = performance.now();
     if (playing) at = Math.min(total, at + ((now - last) / 1000) * speed);
@@ -1269,15 +1587,72 @@ async function replay() {
       playing = false;
       label();
     }
-    $("clock").textContent = `${mmss(at)} / ${mmss(total)}`;
+    updateClock();
   }, 100);
   label();
+  updateClock();
 }
 
 fresh();
 for (const t of document.querySelectorAll(".tile")) t.dataset.note = t.querySelector(".n").textContent;
+const tools = $("lab-tools");
+const menus = [$("app-menu"), $("actions")];
+
+document.addEventListener("click", (event) => {
+  for (const menu of menus) if (menu.open && !menu.contains(event.target)) menu.open = false;
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const menu = menus.find((item) => item.open && item.contains(document.activeElement)) || menus.find((item) => item.open);
+  if (menu) {
+    menu.open = false;
+    menu.querySelector("summary").focus();
+  }
+});
+$("show-tools").addEventListener("click", () => {
+  $("app-menu").open = false;
+  tools.showModal();
+  if (!routesLoaded) loadRoutes();
+});
+tools.addEventListener("close", () => $("app-menu").querySelector("summary").focus());
+$("back-to-alerts").addEventListener("click", () => {
+  $("main").dataset.detail = "false";
+  if (location.hash.startsWith("#alerts/")) history.replaceState(null, "", "#alerts");
+  alertRows.get(selectedAlert)?.firstChild.focus();
+});
+$("alert-list").addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  const row = event.target.closest(".alert-row")?.parentElement;
+  const next = event.key === "ArrowUp" ? row?.previousElementSibling : row?.nextElementSibling;
+  if (!row) return;
+  event.preventDefault();
+  if (next) {
+    const button = next.firstChild;
+    selectAlert(button.dataset.incident, false);
+    button.focus();
+  }
+});
+for (const id of ["incident-report", "incident-activity"]) {
+  $(id).addEventListener("toggle", () => { if ($(id).open) drawIncidents(); });
+}
+for (const id of ["actions", "incident-report", "incident-activity"]) {
+  $(id).querySelector("summary").addEventListener("click", () => (customSelection = true));
+}
+for (const [action, [label]] of Object.entries(ACTIONS)) {
+  const b = el("button", `act ${action}`, label);
+  b.type = "button";
+  b.dataset.action = action;
+  b.addEventListener("click", () => {
+    $("actions").open = false;
+    $("actions").querySelector("summary").focus();
+    requestAction(selectedAlert, action);
+  });
+  $("action-items").append(b);
+}
+$("mode-link").hidden = REPLAY;
 buildRoutes();
-loadRoutes();
+$("retry-routes").addEventListener("click", loadRoutes);
+if (REPLAY) loadRoutes();
 let resizing = 0;
 const ro = new ResizeObserver(() => {
   clearTimeout(resizing);
@@ -1285,9 +1660,26 @@ const ro = new ResizeObserver(() => {
     layoutMine();
     drawChart();
     drawDrive();
+    drawTraffic();
   }, 60);
 });
-for (const id of ["mine", "chart", "drive"]) ro.observe($(id));
+for (const id of ["mine", "chart", "drive", "traffic-chart"]) ro.observe($(id));
+updateView();
+window.addEventListener("hashchange", updateView);
+if (REPLAY) {
+  document.body.dataset.replay = "true";
+  $("launch-watch").href = "#activity";
+  $("launch-watch").firstChild.textContent = "View replay activity";
+}
+for (const control of document.querySelectorAll("[data-range]")) {
+  control.addEventListener("click", () => {
+    trafficWindow = Number(control.dataset.range);
+    for (const button of control.parentElement.children) {
+      button.setAttribute("aria-pressed", String(button === control));
+    }
+    drawTraffic();
+  });
+}
 dirty(...ALL);
 if (REPLAY) replay();
 else live();
