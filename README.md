@@ -2,7 +2,7 @@
 
 ![tests](https://github.com/Durovo51/Data-Dye-Pack/actions/workflows/ci.yml/badge.svg)
 
-**Let them dig. Everything they take comes out stained.**
+**Contained on contact.**
 
 An AI agent that gets into a company reads everything it can reach and copies it out fast.
 Data Dyepack plants dye packs in customer data. When an agent touches the bait, Dyepack catches
