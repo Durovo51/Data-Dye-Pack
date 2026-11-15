@@ -23,9 +23,9 @@ from .tripwire import RANK, Tripwire
 
 WEB = Path(__file__).resolve().parent / "web"
 FILES = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/styles.css": "styles.css",
-         "/sample_events.json": "sample_events.json"}
+         "/sample_events.json": "sample_events.json", "/signal.jpg": "signal.jpg"}
 KINDS = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-         ".css": "text/css; charset=utf-8", ".json": "application/json"}
+         ".css": "text/css; charset=utf-8", ".json": "application/json", ".jpg": "image/jpeg"}
 COLS = ", ".join(schema.CUSTOMER_FIELDS)
 DEFAULT_ROUTES = {"critical": ["push", "sms"], "high": ["push"], "low": []}
 ACTIONS = ("lock", "revoke", "notify_customers", "dismiss")
