@@ -498,6 +498,30 @@ class ServerTest(unittest.TestCase):
         self.assertEqual([b["files"] for b in bursts], [["customers.csv.dye"], ["invoices.json.dye"]])
         self.assertEqual(self.app.burst.burst_drive.call_count, 1)  # the whole drive, once per incident
 
+    def test_breach_notice_counts_files_read_before_the_lock(self):
+        drive = self.data / "drive"
+        real = drive / "billing" / "invoices_notice.csv"
+        real.parent.mkdir(parents=True, exist_ok=True)
+        real.write_text("account_no,amount\nLV1,10\nLV2,20\nLV3,30\n")
+        decoy = str(drive / "billing" / "all_accounts_notice_export.csv")
+        self.app.trip.decoys.append({"decoy_id": "d-notice", "path": decoy, "kind": "export", "rows": 1,
+                                     "batch": "drive", "planted_at": 0})
+        old = self.app.drive, self.app.burst
+        self.app.drive, self.app.burst = mock.Mock(vault_password=lambda: None), None  # no lock in this test
+        try:
+            now = time.time()
+            proc = {"pid": 51515, "process": "/usr/bin/python3", "signing_id": None, "op": "read"}
+            reads = [dict(proc, ts=now, path=str(real)), dict(proc, ts=now + 0.1, path=decoy)]
+            self.assertEqual(self.call("POST", "/lab/fs-event", reads)[0], 200)
+            hit = self.events("alarm", reason="decoy_open", path=decoy)[-1]
+            got = self.call("POST", "/api/respond",
+                            {"incident": hit["detail"]["incident"], "action": "notify_customers"})[1]
+            self.assertEqual(got["plaintext_files"], ["billing/invoices_notice.csv"])  # shown from the drive root
+            self.assertEqual((got["plaintext_rows"], got["customers"]), (3, 3))
+            self.assertNotIn("Locked copy only: likely exempt as encrypted data, check with counsel", got["checklist"])
+        finally:
+            self.app.drive, self.app.burst = old
+
     def test_banner_never_prints_the_control_token(self):
         text = "\n".join(server.banner(self.app, 8750))
         self.assertNotIn(self.app.token, text)
@@ -609,11 +633,43 @@ class ServerTest(unittest.TestCase):
                   token=False)
         self.assertFalse([d for d in self.app.trip.decoys if d["path"] == mine])
 
+    def test_late_page_gets_past_events_and_resumes_without_repeats(self):
+        who = {"id": "", "actor": "test", "ip": "127.0.0.1"}
+        mark, later = f"early-{time.time()}", f"later-{time.time()}"
+        self.app.emit("action", who, "info", {"marker": mark})
+
+        def markers(stream, stop):
+            """Reads the stream until the stop marker. Returns the markers seen and the stop marker's id."""
+            got, last_id = [], None
+            for _ in range(100_000):
+                line = stream.readline()
+                if line.startswith(b"id: "):
+                    last_id = int(line[4:])
+                elif line.startswith(b"data: "):
+                    m = json.loads(line[6:])["detail"].get("marker")
+                    if m:
+                        got.append(m)
+                    if m == stop:
+                        return got, last_id
+            self.fail(f"{stop} never arrived")
+
+        # a page opened after the event still gets it
+        with OPENER.open(self.url + "/events", timeout=10) as stream:
+            self.assertEqual(stream.readline(), b"retry: 2000\n")
+            got, seen = markers(stream, mark)
+        self.assertIsNotNone(seen)
+        # a page that reconnects resumes after the last event it had, with no repeats
+        req = urllib.request.Request(self.url + "/events", headers={"Last-Event-ID": str(seen)})
+        with OPENER.open(req, timeout=10) as stream:
+            self.app.emit("action", who, "info", {"marker": later})
+            got, _ = markers(stream, later)
+        self.assertNotIn(mark, got)
+
     def test_stream_and_pages(self):
         with OPENER.open(self.url + "/events", timeout=5) as stream:
             self.assertEqual(stream.readline(), b"retry: 2000\n")
             kinds = set()
-            for _ in range(200):
+            for _ in range(100_000):  # past events come first, then the ticks
                 line = stream.readline()
                 if line.startswith(b"data: "):
                     kinds.add(json.loads(line[6:])["type"])

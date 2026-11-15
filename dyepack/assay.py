@@ -552,7 +552,10 @@ def notice_checklist(incident, detail):
         day = datetime.fromtimestamp(found).date()
     else:
         day = date.today()
-    plain, copies = d.get("plaintext_rows"), _num(d.get("locked_copies"))
+    plain, locked = d.get("plaintext_rows"), d.get("locked_copies")
+    # the server sends the locked copies as a list of names, older callers as a count
+    copies = len(locked) if isinstance(locked, (list, tuple)) else _num(locked)
+    files = [f for f in (d.get("plaintext_files") or []) if isinstance(f, str)]
     count = _num(d.get("customers")) or _num(plain)
     parts = [f"{_num(plain):,.0f} rows in plain text"] if plain is not None else []
     if copies:
@@ -564,7 +567,12 @@ def notice_checklist(incident, detail):
         f"FCC, FBI and Secret Service: report by {_date(_workdays(day, 7))} (7 business days, 47 CFR 64.2011)",
         f"Customers in Wisconsin: by {_date(day + timedelta(days=45))} (45 days, Wis. Stat. 134.98)",
     ]
-    if plain is not None and _num(plain) == 0:
+    if files:
+        names = ", ".join(os.path.basename(f) for f in files[:4])
+        names += f" and {len(files) - 4} more" if len(files) > 4 else ""
+        lines.insert(2, f"Read in plain text before the lock: {names}. "
+                        f"Treat everyone in {'it' if len(files) == 1 else 'them'} as affected")
+    elif plain is not None and _num(plain) == 0:
         lines.append("Locked copy only: likely exempt as encrypted data, check with counsel")
     lines.append("A notice must say what happened, what data was involved, what we did, "
                  "what they can do and who to contact")

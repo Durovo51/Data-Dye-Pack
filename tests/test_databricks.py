@@ -704,6 +704,17 @@ class NoticeTests(unittest.TestCase):
         self.assertNotIn("Locked copy only: likely exempt as encrypted data, check with counsel",
                          assay.notice_checklist("inc-9", {"plaintext_rows": 5}))
 
+    def test_files_read_in_plain_text(self):
+        lines = assay.notice_checklist("inc-4", {
+            "customers": 2300, "plaintext_rows": 2300,
+            "plaintext_files": ["/d/customers/customers.csv", "/d/billing/invoices_2026_10.json"],
+            "locked_copies": ["/d/customers/customers.csv.dye", "/d/billing/invoices_2026_10.json.dye"],
+            "found_at": self.found(2026, 11, 14)})
+        self.assertEqual(lines[1], "Who is affected by inc-4: 2,300 customers (2,300 rows in plain text, 2 locked copies)")
+        self.assertEqual(lines[2], "Read in plain text before the lock: customers.csv, invoices_2026_10.json. "
+                                   "Treat everyone in them as affected")
+        self.assertNotIn("Locked copy only: likely exempt as encrypted data, check with counsel", lines)
+
 
 if __name__ == "__main__":
     unittest.main()

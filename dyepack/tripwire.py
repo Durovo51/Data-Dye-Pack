@@ -1,5 +1,7 @@
 """The tripwire: canary hits, machine speed, incidents, dig permits and lockdown. All in memory."""
 
+import csv
+import json
 import os
 import threading
 import time
@@ -27,6 +29,35 @@ def _rate(seen, now):
 
 def export_of(canary):
     return canary["batch"] if canary["batch"] not in ("table", "drive") else None
+
+
+def _on_drive(path):
+    """A path as the dashboard shows it: from the drive root, so no home folder lands on screen."""
+    try:
+        return str(Path(path).resolve().relative_to(Path(schema.DRIVE_ROOT).expanduser().resolve()))
+    except (ValueError, OSError):
+        return str(path)
+
+
+def _rows_in(path):
+    """Customer rows in a data file someone read in plain text. Once it's locked, the .dye header
+    keeps the count. Before that, the file itself says."""
+    try:
+        dye = Path(f"{path}.dye")
+        if dye.exists():
+            with open(dye, "rb") as f:
+                magic, head = f.readline(), f.readline()
+            return int(json.loads(head)["rows"]) if magic.strip() == b"DYEPACK1" else 0
+        p = Path(path)
+        if p.suffix.lower() == ".json":
+            data = json.loads(p.read_text())
+            if isinstance(data, dict):
+                data = max((v for v in data.values() if isinstance(v, list)), key=len, default=[])
+            return len(data) if isinstance(data, list) else 0
+        with open(p, newline="") as f:
+            return max(0, sum(1 for _ in csv.reader(f)) - 1)
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
 
 
 class Tripwire:
@@ -220,10 +251,15 @@ class Tripwire:
                     s["fast"] = True
                     self._alarm(s, "speed", "high", rate=rate)
                 # only a read opens a decoy. a write is someone rebuilding the drive
-                decoy = decoy_for(path, self.decoys) if str(e.get("op") or "read") == "read" else None
+                read = str(e.get("op") or "read") == "read"
+                decoy = decoy_for(path, self.decoys) if read else None
                 if decoy and decoy["path"] not in s["decoys"]:
                     s["decoys"].add(decoy["path"])
                     self._alarm(s, "decoy_open", "critical", rate=rate, path=decoy["path"])
+                # a real data file read in plain text. once the drive locks the original is gone, so a
+                # read of one always came before the lock, and a breach notice has to count it
+                if read and not decoy and Path(path).suffix.lower() in (".csv", ".json"):
+                    s.setdefault("plain_files", set()).add(path)
 
     def _file_job(self, e):
         # the mac names a program by its signing id, the linux agent by its path and user
@@ -306,11 +342,14 @@ class Tripwire:
                 detail["revoked"] = sorted(users) + ([inc["export_id"]] if inc["export_id"] else [])
             elif action == "notify_customers":
                 exp = self.exports.get(inc["export_id"])
-                plain = sum(s.get("exposed", 0) for s in sessions)
-                detail["customers"] = exp["real"] if exp else plain
+                files = sorted({f for s in sessions for f in s.get("plain_files", ())})
+                plain = sum(s.get("exposed", 0) for s in sessions) + sum(_rows_in(f) for f in files)
+                detail["customers"] = max(exp["real"] if exp else 0, plain)
                 # what a notice needs: rows that left readable, copies that left locked and when we knew
                 detail["plaintext_rows"] = plain
-                detail["locked_copies"] = ([inc["export_id"]] if inc["export_id"] else []) + inc.get("locked_files", [])
+                detail["plaintext_files"] = [_on_drive(f) for f in files]
+                detail["locked_copies"] = ([inc["export_id"]] if inc["export_id"] else []) + \
+                    [_on_drive(f) for f in inc.get("locked_files", [])]
                 detail["found_at"] = inc["opened"]
                 if self.checklist:
                     try:

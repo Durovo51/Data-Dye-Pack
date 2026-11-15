@@ -100,10 +100,13 @@ class App:
     def emit(self, kind, who, severity, detail):
         event = {"ts": round(time.time(), 3), "type": kind, "session": who.get("id") or "",
                  "actor": who.get("actor") or "", "ip": who.get("ip") or "", "severity": severity, "detail": detail}
-        line = f"data: {json.dumps(event)}\n\n".encode()
         with self.lock:
             if kind != "tick":
                 self.log.append(event)
+                # numbered, so a page that reconnects picks up where it left off without repeats
+                line = f"id: {len(self.log)}\ndata: {json.dumps(event)}\n\n".encode()
+            else:
+                line = f"data: {json.dumps(event)}\n\n".encode()
             for q in self.clients:
                 q.put(line)
         if kind in ("alarm", "lock", "report", "burst", "notify", "action", "export"):
@@ -406,11 +409,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
+        try:
+            seen = max(0, int(self.headers.get("Last-Event-ID") or 0))
+        except ValueError:
+            seen = 0
         q = queue.Queue()
         with self.app.lock:
+            if seen > len(self.app.log):
+                seen = 0  # a page left open from before this server started gets the whole log
+            # a page opened or refreshed after an alarm still sees everything that happened so far
+            past = self.app.log[seen:]
             self.app.clients.append(q)
         try:
             self.wfile.write(b"retry: 2000\n\n")
+            for i, e in enumerate(past, start=seen + 1):
+                self.wfile.write(f"id: {i}\ndata: {json.dumps(e)}\n\n".encode())
             self.wfile.flush()
             while True:
                 try:
