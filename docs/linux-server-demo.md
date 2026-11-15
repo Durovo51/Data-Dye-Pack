@@ -1,7 +1,7 @@
 # Running the Data Dyepack demo on a Linux server
 
 This runs the whole demo on one Ubuntu server: the company drive, the dashboard, the file
-watcher and an attacker. Everything stays on the server, and you watch the dashboard from
+watcher and an attacker. Everything stays on the server and you watch the dashboard from
 your laptop through an SSH tunnel. No root is needed.
 
 ## What you need
@@ -34,7 +34,7 @@ command below as `python3 -m dyepack ...` instead. Nothing else changes.
 dyepack lab && dyepack seed && dyepack drive
 ```
 
-This writes a fake customer table with canary customers mixed in, and a company drive at
+This writes a fake customer table with canary customers mixed in and a company drive at
 `~/LakeviewFiber` with decoy files among the real ones. Every customer in it is made up.
 
 ## 3. Set the lock password
@@ -143,7 +143,7 @@ The inotify watcher sees the file but not which program opened it. A teammate's 
 loopback. It is a second detector, not the attacker.
 
 ## If something does not fire
-- No alarm: make sure `dyepack sentinel` is running and watching `~/LakeviewFiber`, and that
+- No alarm: make sure `dyepack sentinel` is running and watching `~/LakeviewFiber` and that
   the attacker read files under that folder.
 - No lock: check that `DYEPACK_LOCK_PASSWORD` is set in `.env`. The server prints a note when
   it is missing.
