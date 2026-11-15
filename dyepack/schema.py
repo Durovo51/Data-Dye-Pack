@@ -8,7 +8,7 @@ DB_PATH = DATA_DIR / "lakeview.db"         # lab customer table (sqlite)
 WATCH_PATH = DATA_DIR / "watch_list.json"  # canary list, kept apart from the table
 PROFILE_PATH = DATA_DIR / "profile.json"   # value counts per part
 EXPORTS_DIR = DATA_DIR / "exports"         # honey locked files
-VAULT_DIR = DATA_DIR / "vault"             # real files sealed away after a burst
+VAULT_DIR = DATA_DIR / "vault"             # old burst folder, unused since files lock in place (tests still patch it)
 DRIVE_ROOT = Path(os.environ.get("DYEPACK_DRIVE", Path.home() / "LakeviewFiber"))  # lab company drive
 
 # sqlite: table "customers" holds real rows plus canaries,
@@ -54,7 +54,8 @@ SEVERITIES = ("info", "low", "high", "critical")
 #            "looks_like": "ai_agent" or "person", "actions": ["lock", "revoke", "notify_customers", "dismiss"]}
 #   drill:  {"phase": "normal", "heist-1", "heist-2", "heist-3" or "agent", "status": "start" or "end", "score": {...}}
 #   read from the file sentinel: {"path": "...", "process": "node", "pid": 4242, "files_per_min": 180}
-#   burst:  {"incident": "inc-2", "folder": "...", "files": ["customers.csv"], "vault": "..."}
+#   burst:  {"incident": "inc-2", "folder": "...", "files": ["customers.csv.dye"],
+#            "vault": "full .dye paths, comma separated (the key keeps its old name)"}  one per locked folder
 #   notify: {"incident": "inc-2", "channel": "push", "sms", "email" or "discord",
 #            "status": "sent", "simulated" or "failed", "summary": "the exact text sent"}
 # drill score keys: normal_alarms, detect_seconds, rows_exposed, guesses_cracked,

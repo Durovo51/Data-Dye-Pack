@@ -71,7 +71,7 @@ def plant(every=250, rng=None):
         fake_accounts = {r["account_no"] for r in fakes}
 
         save_profile(profile)
-        lab.write_private(schema.WATCH_PATH, {"canaries": watch})
+        lab.update_watch(lambda w: {"canaries": watch})  # a fresh table starts a fresh list
         con.execute("BEGIN")
         con.execute("DROP TABLE customers")
         con.execute("DROP TABLE portal_accounts")

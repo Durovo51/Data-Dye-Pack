@@ -33,13 +33,14 @@ class Tripwire:
     """emit(type, session, severity, detail) sends an event. changed(incident, alarm, opened, escalated)
     hears about every alarm. That lets the server write reports, send alerts or burst a folder."""
 
-    def __init__(self, emit, changed, canaries, decoys=()):
+    def __init__(self, emit, changed, canaries, decoys=(), file_jobs=()):
         self.emit, self.changed = emit, changed
         self.mutex = threading.RLock()
         self.canaries = {}  # account_no, portal_user, email and phone all point at the watch entry
         self.entries = []
         self.watch(canaries)
         self.decoys = list(decoys)
+        self.file_jobs = list(file_jobs)  # registered tools that touch the drive on purpose
         self.sessions, self.incidents = {}, {}
         self.by_session, self.by_export, self.by_actor = {}, {}, {}
         self.groups = {}  # ("actor", name) or ("ip", address) -> the same counters a session keeps
@@ -194,6 +195,12 @@ class Tripwire:
                     continue
                 path, name = str(e.get("path") or ""), Path(str(e.get("process") or "unknown")).name
                 key = "f-" + "-".join(str(x) for x in (host, pid if pid is not None else name) if x)
+                job = self._file_job(e)
+                if job:
+                    # a registered backup or sync job: logged, never counted for speed or decoys
+                    self.emit("read", {"id": key, "actor": name, "ip": host or "127.0.0.1"}, "info",
+                              {"path": path, "process": name, "pid": pid, "job": job})
+                    continue
                 now = float(e.get("ts") or self.clock())
                 s = self.files.get(key)
                 inc = self.incidents.get(self.by_session.get(s["id"])) if s else None
@@ -217,6 +224,15 @@ class Tripwire:
                 if decoy and decoy["path"] not in s["decoys"]:
                     s["decoys"].add(decoy["path"])
                     self._alarm(s, "decoy_open", "critical", rate=rate, path=decoy["path"])
+
+    def _file_job(self, e):
+        # the mac names a program by its signing id, the linux agent by its path and user
+        for job in self.file_jobs:
+            if job.get("signing_id") and job["signing_id"] == e.get("signing_id"):
+                return job.get("name") or job["signing_id"]
+            if job.get("exe") and job["exe"] == e.get("process") and job.get("user") == e.get("username"):
+                return job.get("name") or job["exe"]
+        return None
 
     # incidents
 

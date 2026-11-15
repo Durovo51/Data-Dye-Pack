@@ -1,7 +1,8 @@
-"""Targeted burst. When a decoy fires, the customer data files in that one folder get honey
-locked in place: customers.csv becomes customers.csv.dye right next to it and the original goes
-away, so the company's own apps fail loudly instead of quietly reading made up customers. Only
-CSV and JSON customer tables get touched, never any other file. dyepack unlock puts them back.
+"""Burst. When a decoy fires, the server honey locks the customer data files on the whole drive in
+place (burst_drive runs burst on every folder): customers.csv becomes customers.csv.dye right next
+to it and the original goes away, so the company's own apps fail loudly instead of quietly reading
+made up customers. Only CSV and JSON customer tables get touched, never any other file. dyepack
+unlock puts them back with the lock password (DYEPACK_LOCK_PASSWORD).
 
 A stolen .dye opens to believable fakes for every wrong password. The team's own unlock still
 tells a wrong password apart: the burst records which canaries each file held, plus a hash of
@@ -59,7 +60,7 @@ def burst(folder, password):
     if not folder.is_dir():
         raise ValueError(f"no folder at {folder}")
     if not password:
-        raise ValueError("no vault password, set DYEPACK_VAULT_PASSWORD in .env")
+        raise ValueError("no lock password, set DYEPACK_LOCK_PASSWORD in .env")
     decoys = load_decoys()
     out = {"folder": str(folder), "files": [], "vault": [], "skipped": []}
     for path in scan(folder, recursive=False):
@@ -128,7 +129,7 @@ def locked():
 def cmd_burst(args):
     password = vault_password()
     if not password:
-        return _fail("set DYEPACK_VAULT_PASSWORD in .env first")
+        return _fail("set DYEPACK_LOCK_PASSWORD in .env first")
     try:
         out = burst(args.folder, password)
     except (OSError, ValueError) as e:
@@ -152,7 +153,7 @@ def cmd_unlock(args):
         return 0
     if dest and len(files) > 1:
         return _fail("--to takes one .dye file")
-    password = vault_password() or getpass.getpass("Vault password: ")
+    password = vault_password() or getpass.getpass("Lock password: ")
     bad = 0
     for f in files:
         try:
@@ -232,11 +233,12 @@ def _canaries():
 
 
 def _update_locked(drop, add=None):
-    # read fresh and change only "locked", since other parts of dyepack share this file
-    watch = _watch()
-    watch["locked"] = [r for r in watch.get("locked", []) if r["dye"] != drop] + ([add] if add else [])
-    schema.WATCH_PATH.parent.mkdir(parents=True, exist_ok=True)
-    lab.write_private(schema.WATCH_PATH, watch)
+    # change only "locked", under the shared lock, since other parts of dyepack write this file too
+    def change(watch):
+        watch.setdefault("canaries", [])
+        watch["locked"] = [r for r in watch.get("locked", []) if r["dye"] != drop] + ([add] if add else [])
+
+    lab.update_watch(change)
 
 
 def _with_layout(blob, lay):

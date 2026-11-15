@@ -418,7 +418,7 @@ def agent(lab_, watch, args):
             print(f"agent: burst locked {', '.join(d.get('files') or [])} in place in {d.get('folder')}")
         print("  dyepack unlock puts them back")
     elif alarm:
-        print("agent: no burst seen (DYEPACK_VAULT_PASSWORD in .env?)", file=sys.stderr)
+        print("agent: no burst seen (DYEPACK_LOCK_PASSWORD in .env?)", file=sys.stderr)
     return {"detect_seconds": _round(detect), "decoy": bool(alarm), "burst": bool(burst)}
 
 

@@ -1,5 +1,6 @@
 """Lakeview Fiber, a made up internet provider full of fake subscribers."""
 
+import fcntl
 import hashlib
 import hmac
 import itertools
@@ -110,6 +111,22 @@ def write_customers(con, table, rows):
 def write_portal(con, accounts):
     con.execute("CREATE TABLE portal_accounts (portal_user TEXT PRIMARY KEY, password_hash TEXT, salt TEXT)")
     con.executemany("INSERT INTO portal_accounts VALUES (?, ?, ?)", accounts)
+
+
+def update_watch(change):
+    """Reads, changes and writes the watch list under one lock. The server, a burst and the drive
+    never drop each other's entries. change(watch) edits the dict or returns a whole new one."""
+    path = schema.WATCH_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path.with_name(path.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)  # threads and other processes both wait here
+        watch = json.loads(path.read_text()) if path.exists() else {}
+        watch = change(watch) or watch
+        write_private(path, watch)
+        return watch
+    finally:
+        os.close(fd)  # closing lets go of the lock
 
 
 def write_private(path, data):

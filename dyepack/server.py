@@ -81,7 +81,9 @@ class App:
             self.staff = {u: (h, s, role) for u, h, s, role in
                           con.execute("SELECT user, password_hash, salt, role FROM staff")}
         decoys = self.drive.load_decoys() if self.drive else []
-        self.trip = Tripwire(self.emit, self.changed, canary.load_watch(), decoys)
+        # registered tools that touch the drive on purpose, kept on the security side like the canaries
+        file_jobs = json.loads(schema.WATCH_PATH.read_text()).get("file_jobs", [])
+        self.trip = Tripwire(self.emit, self.changed, canary.load_watch(), decoys, file_jobs)
         self.trip.exports = self._load_exports()
         self.trip.checklist = getattr(self.assay, "notice_checklist", None)
         # a fresh key every start. drills, the sentinel and the map read it and send it back
@@ -212,7 +214,7 @@ class App:
     def _burst(self, iid):
         password = self.drive.vault_password() if self.drive else None
         if not (self.burst and password):
-            self._note("no burst: put DYEPACK_VAULT_PASSWORD in .env so the drive can be locked")
+            self._note("no burst: put DYEPACK_LOCK_PASSWORD in .env so the drive can be locked")
             return
         try:
             out = self.burst.burst_drive(password)
@@ -255,18 +257,21 @@ class App:
                 self.profile, max(1, len(rows) // 250),
                 [r["account_no"] for r in known], [r["portal_user"] for r in known], eid,
                 taken_contacts=[r[f] for r in known for f in ("email", "phone")])
-            # ids carry on after every canary already on the list, drive ones included
-            first = 1 + max((int(c["canary_id"][2:]) for c in watch["canaries"]), default=0)
-            for i, e in enumerate(entries):
-                e["canary_id"] = f"c-{first + i:03d}"
             mixed = rows + fakes
             random.SystemRandom().shuffle(mixed)  # the lock keeps row order
-            # the lab's rows come from the public recipe, so the lock uses it too. a jittered profile in the
+            # the lab's rows come from the public recipe and the lock uses it too. a jittered profile in the
             # header would let anyone with the repo rank the real list first. if this fails nothing is written
             blob = self.honey.lock(mixed, password, None)
             # watch first. the worst case is then watched canaries that no file holds
-            watch["canaries"] += entries
-            lab.write_private(schema.WATCH_PATH, watch)
+
+            def add(latest):
+                # numbered under the lock, after every canary on the list now, drive and bursts included
+                first = 1 + max((int(c["canary_id"][2:]) for c in latest.get("canaries", [])), default=0)
+                for i, e in enumerate(entries):
+                    e["canary_id"] = f"c-{first + i:03d}"
+                latest.setdefault("canaries", []).extend(entries)
+
+            lab.update_watch(add)
             self.trip.watch(entries)
             schema.EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
             with open(os.open(schema.EXPORTS_DIR / f"{eid}.dye", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
@@ -534,7 +539,7 @@ class Handler(BaseHTTPRequestHandler):
         drive = Path(schema.DRIVE_ROOT).expanduser().resolve()
         with self.app.trip.mutex:
             known = {d["path"] for d in self.app.trip.decoys}
-            # this route has no token, so it can never make a file on our own drive into a decoy
+            # this route has no token. it can never make a file on our own drive into a decoy
             self.app.trip.decoys += [bridge.decoy_entry(e) for e in events if e["path"] not in known
                                      and drive not in Path(e["path"]).resolve().parents]
         self._fs(events)

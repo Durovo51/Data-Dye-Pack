@@ -15,7 +15,7 @@ from pathlib import Path
 from . import canary, honey, lab, schema
 from .profile import load_profile
 
-REAL_ROWS = 2000  # small, so a burst seals it in well under a second
+REAL_ROWS = 2000  # small, so a burst locks it in well under a second
 INVOICES = 300
 # decoys: path on the drive -> (kind, canary rows). each one sorts first in its folder,
 # so whoever lists a folder and reads from the top opens the decoy before the real file
@@ -111,10 +111,18 @@ def build_drive(root=None, seed=7, password=None):
     # the real files just came back fresh from the lab, so a burst's .dye of them would only make
     # the next burst skip them. any other locked file keeps its .dye
     fresh = {f"{root / rel}.dye" for rel in ("customers/customers.csv", "billing/invoices_2026_10.json")}
-    watch["canaries"] = keep + entries
-    watch["decoys"] = decoys
-    watch["locked"] = [r for r in watch.get("locked", []) if r["dye"] not in fresh]
-    lab.write_private(schema.WATCH_PATH, watch)
+    def swap(latest):
+        # under the shared lock and against the newest list. export canaries, file jobs and the
+        # rest stay. drive canaries get numbered after whatever is there now
+        keep_now = [c for c in latest.get("canaries", []) if c.get("batch") != "drive"]
+        start = 1 + max((_number(c["canary_id"]) for c in keep_now), default=0)
+        for i, e in enumerate(entries):
+            e["canary_id"] = f"c-{start + i:03d}"
+        latest["canaries"] = keep_now + entries
+        latest["decoys"] = decoys
+        latest["locked"] = [r for r in latest.get("locked", []) if r["dye"] not in fresh]
+
+    lab.update_watch(swap)
     # decoys from an older layout would sit there unwatched, full of canaries nobody checks
     for p in map(Path, (*old, *fresh)):
         if root in p.parents:
@@ -148,20 +156,27 @@ def decoy_for(path, decoys=None):
     return next((d for d in (load_decoys() if decoys is None else decoys) if _key(d["path"]) == key), None)
 
 
+LOCK_KEYS = ("DYEPACK_LOCK_PASSWORD", "DYEPACK_VAULT_PASSWORD")  # new name first, the old one still works
+
+
 def vault_password(env_file=".env"):
-    """DYEPACK_VAULT_PASSWORD from the environment or .env. Never print it."""
-    pw = os.environ.get("DYEPACK_VAULT_PASSWORD")
-    if pw:
-        return pw
+    """The lock password for .dye files: DYEPACK_LOCK_PASSWORD, or its old name DYEPACK_VAULT_PASSWORD,
+    from the environment first and then .env. Never print it."""
+    for key in LOCK_KEYS:
+        pw = os.environ.get(key)
+        if pw:
+            return pw
     try:
         lines = Path(env_file).read_text().splitlines()
     except OSError:
         return None
+    found = {}
     for line in lines:
         key, _, value = line.strip().partition("=")
-        if key.strip() == "DYEPACK_VAULT_PASSWORD":
-            return value.strip().strip("\"'") or None
-    return None
+        key = key.strip()
+        if key in LOCK_KEYS and key not in found:
+            found[key] = value.strip().strip("\"'")
+    return next((found[k] for k in LOCK_KEYS if found.get(k)), None)
 
 
 def cmd_drive(args):
@@ -170,8 +185,8 @@ def cmd_drive(args):
     except (RuntimeError, OSError, ValueError, sqlite3.Error) as e:
         print(e, file=sys.stderr)
         return 1
-    lock = "the vault password" if out["own_password"] else \
-        "a throwaway password (set DYEPACK_VAULT_PASSWORD in .env to use yours)"
+    lock = "your lock password" if out["own_password"] else \
+        "a throwaway password (set DYEPACK_LOCK_PASSWORD in .env to use yours)"
     w = max(len(rel) for rel in DECOYS)
     print(f"Lakeview Fiber's drive is ready in {out['root']}")
     print(f"  {'customers/customers.csv':<{w}} {out['rows']:>6,} customers "

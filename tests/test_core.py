@@ -179,6 +179,25 @@ class FileSessionTest(unittest.TestCase):
         self.assertNotEqual(opens[0]["detail"]["incident"], opens[1]["detail"]["incident"])
         self.assertEqual([e["session"] for e in opens], ["f-unknown", "f-unknown-2"])
 
+    def test_registered_file_job_never_alarms(self):
+        events = []
+        jobs = [{"name": "nightly backup", "signing_id": "com.example.backup"},
+                {"name": "offsite sync", "exe": "/usr/bin/rsync", "user": "backup"}]
+        trip = Tripwire(lambda kind, who, sev, detail: events.append({"type": kind, "detail": detail}) or events[-1],
+                        lambda *a: None, [], file_jobs=jobs)
+        decoy = "/tmp/drive/customers/all_customers_full_export_2026.csv"
+        trip.decoys = [{"decoy_id": "d-1", "path": decoy, "kind": "export", "rows": 1, "batch": "drive",
+                        "planted_at": 0}]
+        hits = [{"ts": 1.0 + i / 10, "pid": 50, "process": "/usr/local/bin/backup", "signing_id": "com.example.backup",
+                 "path": decoy, "op": "read"} for i in range(40)]
+        hits.append({"ts": 2.0, "pid": 51, "process": "/usr/bin/rsync", "username": "backup", "server_id": "web-01",
+                     "path": decoy, "op": "read"})
+        trip.file_events(hits)
+        self.assertFalse([e for e in events if e["type"] == "alarm"])
+        self.assertEqual({e["detail"]["job"] for e in events if e["type"] == "read"}, {"nightly backup", "offsite sync"})
+        trip.file_events([dict(hits[0], pid=52, process="/usr/local/bin/node", signing_id=None)])
+        self.assertEqual([e["detail"]["reason"] for e in events if e["type"] == "alarm"], ["decoy_open"])
+
     def test_writing_a_decoy_is_not_opening_it(self):
         events = []
         trip = Tripwire(lambda kind, who, sev, detail: events.append({"type": kind, "detail": detail}) or events[-1],
@@ -236,6 +255,40 @@ class GroupTest(unittest.TestCase):
             self.now[0] = 1000.0 + 3 * i  # one 10 row search every 3 s
             self.trip.read(sid, [f"LV{i}{n:07d}" for n in range(10)], "/api/customers")
         self.assertFalse([e for e in self.events if e["type"] == "alarm"])
+
+
+class WatchLockTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.data = Path(tmp.name)
+        for patch in point_at(self.data):
+            patch.start()
+            self.addCleanup(patch.stop)
+        lab.update_watch(lambda w: {"canaries": [], "decoys": [{"decoy_id": "d-1"}]})
+
+    def test_threads_never_drop_each_others_entries(self):
+        def add(i):
+            lab.update_watch(lambda w: w["canaries"].append({"canary_id": f"c-{i}"}))
+
+        threads = [threading.Thread(target=add, args=(i,)) for i in range(30)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        watch = json.loads(schema.WATCH_PATH.read_text())
+        self.assertEqual(len(watch["canaries"]), 30)
+        self.assertEqual(watch["decoys"], [{"decoy_id": "d-1"}])  # keys nobody touched stay
+        self.assertEqual(stat.S_IMODE(schema.WATCH_PATH.stat().st_mode), 0o600)
+
+    def test_two_processes_never_drop_each_others_entries(self):
+        code = ("from dyepack import lab\n"
+                "for i in range(25):\n"
+                "    lab.update_watch(lambda w: w['canaries'].append({'canary_id': 'c'}))\n")
+        env = {**os.environ, "DYEPACK_DATA": str(self.data)}
+        procs = [subprocess.Popen([sys.executable, "-c", code], cwd=ROOT, env=env) for _ in range(2)]
+        self.assertEqual([p.wait(timeout=60) for p in procs], [0, 0])
+        self.assertEqual(len(json.loads(schema.WATCH_PATH.read_text())["canaries"]), 50)
 
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
